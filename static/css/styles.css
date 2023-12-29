@@ -1,0 +1,409 @@
+:root {
+    --day-background: #f0f0f0;
+    --day-text: #333;
+    --day-accent: #4CAF50;
+    --night-background: #202124;
+    --night-text: #e8eaed;
+    --night-accent: #8ab4f8;
+}
+
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+    transition: background-color 0.3s, color 0.3s;
+}
+
+body {
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    line-height: 1.6;
+    padding: 20px;
+    background-color: var(--day-background);
+    color: var(--day-text);
+}
+
+.day-mode {
+    --background: var(--day-background);
+    --text: var(--day-text);
+    --accent: var(--day-accent);
+}
+
+.night-mode {
+    --background: var(--night-background);
+    --text: var(--night-text);
+    --accent: var(--night-accent);
+}
+
+.container {
+    max-width: 700px;
+    margin: auto;
+    padding: 50px;
+    background: var(--background);
+    color: var(--text);
+    text-align: center;
+    border-radius: 8px;
+    box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+}
+
+.header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.mode-toggle {
+    cursor: pointer;
+}
+
+.mode-toggle span {
+    font-size: 24px;
+}
+
+h1 {
+    font-size: 2.5rem;
+    margin-bottom: 10px;
+}
+
+p {
+    margin-bottom: 20px;
+}
+
+#conversion-options {
+    margin: 20px 0;
+}
+
+#conversion-options label {
+    margin-right: 10px;
+    font-weight: 600;
+}
+
+#conversion-options input[type="radio"] {
+    margin-right: 5px;
+}
+
+.btn {
+    display: inline-block;
+    background: var(--accent);
+    color: #fff;
+    padding: 10px 20px;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background 0.3s;
+}
+
+.btn:hover {
+    background: darken(var(--accent), 10%);
+}
+
+.hidden {
+    display: none;
+}
+
+.fade-in {
+    animation: fade-in 1s forwards;
+}
+
+@keyframes fade-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+/* Additional styles for better responsiveness and aesthetics */
+@media (max-width: 768px) {
+    .container {
+        padding: 20px;
+    }
+
+    .header h1 {
+        font-size: 2rem;
+    }
+}
+
+/* Improve form input and button aesthetics */
+input[type="file"] {
+    margin: 10px 0;
+    padding: 5px;
+    border: 1px solid var(--text);
+    border-radius: 4px;
+    background: var(--background);
+    color: var(--text);
+}
+
+/* Style changes for toggle between day and night mode */
+.toggle-label {
+    color: var(--text-color);
+    font-size: 0.9rem;
+    font-weight: 600;
+}
+
+/* Daytime wave animation */
+@keyframes wave {
+  0%, 100% {
+    transform: translateX(-50%);
+  }
+  50% {
+    transform: translateX(50%);
+  }
+}
+
+
+/* Feedback Button Styles */
+.feedback-button {
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
+    background-color: var(--accent);
+    color: white;
+    padding: 10px;
+    border-radius: 50%;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+    cursor: pointer;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 1000; /* Ensure it's above other elements */
+}
+
+.feedback-button .material-icons {
+    font-size: 24px;
+}
+
+/* Tooltip Styles */
+.feedback-tooltip {
+    visibility: hidden;
+    width: 120px;
+    background-color: black;
+    color: white;
+    text-align: center;
+    border-radius: 6px;
+    padding: 5px 0;
+    position: absolute;
+    z-index: 1;
+    bottom: 150%;
+    left: 50%;
+    margin-left: -60px; /* Center the tooltip */
+    opacity: 0;
+    transition: opacity 0.3s;
+}
+
+.feedback-button:hover .feedback-tooltip {
+    visibility: visible;
+    opacity: 1;
+}
+
+/*.feedback-modal {
+    display: none; /* Hidden by default */
+    position: fixed; /* Stay in place */
+/*    z-index: 1001; /* Sit on top */*/
+    left: 0;
+    top: 0;
+    width: 100%; /* Full width */
+    height: 100%; /* Full height */
+    overflow: auto; /* Enable scroll if needed */
+    background-color: rgba(0, 0, 0, 0.4); /* Black with opacity */
+}*/
+
+
+.feedback-content {
+    background-color: var(--background);
+    margin: 15% auto; /* 15% from the top and centered */
+    padding: 20px;
+    border: 1px solid var(--text);
+    width: 80%; /* Could be more or less, depending on screen size */
+    max-width: 500px; /* Maximum width */
+    border-radius: 8px;
+    box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+}
+
+.feedback-content h2 {
+    margin-bottom: 20px;
+}
+
+.feedback-content form {
+    display: flex;
+    flex-direction: column;
+}
+
+.feedback-content textarea, .feedback-content input[type="email"] {
+    padding: 10px;
+    margin-bottom: 10px;
+    border: 1px solid var(--text);
+    border-radius: 4px;
+    background: var(--background);
+    color: var(--text);
+}
+
+.feedback-content button {
+    background: var(--accent);
+    color: white;
+    padding: 10px 20px;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    margin-top: 10px;
+}
+
+.feedback-content .close {
+    color: var(--text);
+    float: right;
+    font-size: 28px;
+    font-weight: bold;
+    cursor: pointer;
+}
+
+.feedback-content .close:hover, .feedback-content .close:focus {
+    color: var(--accent);
+    text-decoration: none;
+    cursor: pointer;
+}
+
+.day .waves {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  width: 100%;
+  height: 120px;
+  overflow: hidden;
+  background: linear-gradient(to top, #a2d6f9, transparent);
+}
+
+.day .waves::before,
+.day .waves::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 50%;
+  width: 500%;
+  height: 100%;
+  background: repeat-x linear-gradient(
+    -45deg,
+    transparent,
+    transparent 24%,
+    rgba(173, 216, 230, 0.5) 25%,
+    rgba(173, 216, 230, 0.5) 26%,
+    transparent 27%,
+    transparent 74%,
+    rgba(173, 216, 230, 0.5) 75%,
+    rgba(173, 216, 230, 0.5) 76%,
+    transparent 77%,
+    transparent
+  );
+}
+
+.day .waves::before {
+  top: -50px;
+  animation: wave 12s linear infinite;
+}
+
+.day .waves::after {
+  top: -100px;
+  animation: wave 18s linear infinite reverse;
+}
+
+/* Nighttime twinkling stars */
+@keyframes twinkle {
+  0% { transform: scale(1); }
+  100% { transform: scale(1.2); }
+}
+
+.night .star-field {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: var(--night-background);
+  z-index: -1;
+}
+
+.night .star {
+  position: absolute;
+  width: 2px;
+  height: 2px;
+  background: white;
+  border-radius: 50%;
+  box-shadow: 0px 0px 2px #fff,
+               50px 100px 2px #fff,
+               100px 150px 2px #fff,
+               150px 200px 2px #fff,
+               200px 250px 2px #fff,
+               250px 300px 2px #fff,
+               300px 350px 2px #fff,
+               350px 400px 2px #fff,
+               400px 450px 2px #fff,
+               450px 500px 2px #fff;
+  animation: twinkle 1.5s infinite alternate;
+}
+.progress-bar-container {
+    position: fixed;
+    width: 100%;
+    top: 0;
+    left: 0;
+    background-color: #f0f0f0;
+}
+
+.progress-bar {
+    height: 5px;
+    background-color: #4CAF50;
+    width: 0%;
+    transition: width 0.4s ease-in-out;
+}
+
+/* Styles for the quality control slider */
+#quality-control {
+    margin: 20px 0;
+    text-align: left;
+}
+
+#quality-slider {
+    -webkit-appearance: none; /* Override default appearance */
+    appearance: none;
+    width: 100%;
+    height: 10px; /* Slider track height */
+    background: var(--accent); /* Track background */
+    outline: none; /* Remove outline */
+    opacity: 0.7; /* Partial transparency */
+    transition: opacity 0.2s; /* Transition for hover effect */
+}
+
+#quality-slider:hover {
+    opacity: 1; /* Full opacity on hover */
+}
+
+#quality-slider::-webkit-slider-thumb {
+    -webkit-appearance: none; /* Override default appearance */
+    appearance: none;
+    width: 25px; /* Width of the slider thumb */
+    height: 25px; /* Height of the slider thumb */
+    background: var(--text); /* Thumb background color */
+    cursor: pointer; /* Cursor on hover */
+    border-radius: 50%; /* Make it circular */
+    border: 2px solid var(--accent); /* Add border */
+}
+
+#quality-slider::-moz-range-thumb {
+    width: 25px;
+    height: 25px;
+    background: var(--text);
+    cursor: pointer;
+    border-radius: 50%;
+    border: 2px solid var(--accent);
+}
+
+/* Style the label for the quality slider */
+#quality-control label {
+    display: block; /* Make label take up the full width */
+    margin-bottom: 5px;
+    font-weight: bold;
+    color: var(--text);
+}
+
+#quality-value {
+    display: inline-block; /* Display next to slider */
+    margin-left: 10px;
+    font-weight: bold;
+    color: var(--accent);
+}
+
+

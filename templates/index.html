@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>File Compressor and Converter</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+    <!-- Include Material Icons stylesheet -->
+    <link href="https://fonts.googleapis.com/icon?family=Material+Icons+Outlined" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+
+</head>
+<body class="day-mode">
+    <div class="background-animation day">
+        <!-- SVG for minimalist waves -->
+        <div class="waves">
+            <svg viewbox="0 24 150 28" preserveAspectRatio="none" shape-rendering="auto">
+                <defs>
+                    <path id="gentle-wave" d="M-160 44c30 0 
+                    58-18 88-18s
+                    58 18 88 18 
+                    58-18 88-18 
+                    58 18 88 18
+                    v44h-352z" />
+                </defs>
+                <g class="parallax">
+                    <use xlink:href="#gentle-wave" x="48" y="0" fill="rgba(255,255,255,0.7)" />
+                    <use xlink:href="#gentle-wave" x="48" y="3" fill="rgba(255,255,255,0.5)" />
+                    <use xlink:href="#gentle-wave" x="48" y="5" fill="rgba(255,255,255,0.3)" />
+                    <use xlink:href="#gentle-wave" x="48" y="7" fill="#fff" />
+                </g>
+            </svg>
+        </div>
+    </div>
+    <div class="background-animation night hidden">
+        <!-- Nighttime twinkling stars -->
+        <div class="star-field">
+            <div class="star" style="top: 10%; left: 15%;"></div>
+            <div class="star" style="top: 20%; left: 25%; animation-delay: -0.4s;"></div>
+            <div class="star" style="top: 30%; left: 35%; animation-delay: -0.2s;"></div>
+            <!-- Add more stars with different positions and delays as needed -->
+        </div>
+    </div>
+    <div class="container">
+        <div class="header">
+            <h1>File Compressor & Converter</h1>
+            <div id="mode-toggle" class="mode-toggle">
+                <span id="toggle-icon" class="material-icons-outlined">light_mode</span>
+            </div>
+        </div>
+        <p>Select an image or PDF to compress or convert.</p>
+        <form id="upload-form">
+            <input type="file" id="file-input" required>
+            <div id="conversion-options">
+                <label>
+                    <input type="radio" name="action" value="compress"> Compress
+                </label>
+                <label>
+                    <input type="radio" name="action" value="image_to_pdf" checked> Image to PDF
+                </label>
+                <label>
+                    <input type="radio" name="action" value="pdf_to_image"> PDF to Image
+                </label>
+            </div>
+            <div id="quality-control" class="hidden">
+                <label for="quality-slider">Compression Quality:</label>
+                <input type="range" id="quality-slider" name="quality" min="10" max="100" value="50">
+                <span id="quality-value">50%</span>
+            </div>
+            <button type="submit" class="btn">Execute</button>
+            <button type="button" class="btn hidden" id="reset-button" onclick="resetApplication()">Reset</button>
+        </form>
+        <div id="download-section" class="hidden">
+            <a id="download-link" class="btn" href="#" download>Download File</a>
+        </div>
+    </div>
+    <div id="feedback-button" class="feedback-button" onclick="showFeedbackForm()">
+        <span class="material-icons">feedback</span>
+        <span class="feedback-tooltip hidden">Please provide feedback</span>
+    </div>
+<!-- Feedback form modal -->
+<div id="feedback-modal" class="feedback-modal hidden">
+    <div class="feedback-content">
+        <span class="close" onclick="hideFeedbackForm()">&times;</span>
+        <h2>Feedback</h2>
+        <form id="feedback-form">
+            <textarea placeholder="Your feedback" required></textarea>
+            <input type="email" placeholder="Your email (optional)"></input>
+            <div class="feedback-buttons">
+                <button type="submit" class="btn">Submit</button>
+                <button type="button" onclick="hideFeedbackForm()" class="btn">Cancel</button>
+            </div>
+        </form>
+    </div>
+</div>
+    <script src="{{ url_for('static', filename='js/script.js') }}"></script>
+</body>
+</html>
