@@ -144,6 +144,8 @@ jobs:
       contents: read
       pull-requests: write
     steps:
+      # The report-failure action lives in the repo, so it has to be checked out.
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: fileoptimize-linux-x86_64
@@ -158,6 +160,7 @@ jobs:
           RUST_LOG: info
         run: |
           set -euo pipefail
+          trap 'echo "SMOKE FAILED at script line $LINENO"' ERR
           ./bin/fileoptimize > /tmp/server.log 2>&1 &
           pid=$!
           for i in $(seq 1 30); do
@@ -166,8 +169,11 @@ jobs:
           done
           echo "--- health"; curl -fsS http://127.0.0.1:8099/api/health; echo
           echo "--- info";   curl -fsS http://127.0.0.1:8099/api/info; echo
-          echo "--- ui";      curl -fsS http://127.0.0.1:8099/ | grep -q "<!DOCTYPE html>" && echo ok
-          echo "--- assets";  curl -fsS http://127.0.0.1:8099/assets/style.css | head -c 40; echo
+          echo "--- ui";      curl -fsS -o /tmp/ui.html http://127.0.0.1:8099/
+                              grep -q "<!DOCTYPE html>" /tmp/ui.html && echo "page served"
+          echo "--- assets";  curl -fsS -o /tmp/style.css http://127.0.0.1:8099/assets/style.css
+                              head -c 40 /tmp/style.css; echo
+                              grep -q ":" /tmp/style.css && echo "asset served"
           echo "--- 404";     curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8099/nope
           echo "--- 400 (json body)"; curl -s -o /dev/null -w '%{http_code}\n' -X POST -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:8099/api/process
           echo "--- 400";     curl -s -X POST -F 'action=nope' http://127.0.0.1:8099/api/process; echo
