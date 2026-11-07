@@ -39,8 +39,16 @@ fn sample_jpeg_bytes() -> Vec<u8> {
 }
 
 /// Lossless byte→char view of a binary buffer, so string offsets equal byte offsets.
-fn latin1(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| *b as char).collect()
+/// A **byte-aligned** ASCII view of a buffer: every non-ASCII byte becomes a space, so an
+/// index into the returned String is also an index into the original bytes. That matters for
+/// PDF structure checks, because an `xref` entry records a byte offset in the file — a
+/// lossy UTF-8 or latin1 round trip inflates high bytes and silently shifts every later
+/// position, which is how this test once passed while proving nothing.
+fn ascii_view(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|b| if b.is_ascii() { *b as char } else { ' ' })
+        .collect()
 }
 
 // ---------------------------------------------------------------- sanitize
@@ -232,7 +240,7 @@ fn image_pdf_has_valid_structure_and_xref_offsets() {
 
     assert!(pdf.starts_with(b"%PDF-1.4"));
     assert!(pdf.windows(5).any(|w| w == b"%%EOF"));
-    let text = latin1(&pdf);
+    let text = ascii_view(&pdf);
 
     // The JPEG is embedded verbatim — no transcode, no second lossy generation.
     assert!(
@@ -315,11 +323,11 @@ fn image_pdf_has_valid_structure_and_xref_offsets() {
 fn image_pdf_page_box_uses_dpi_scaling() {
     // 32×20 px at 100 DPI → 23×14 pt.
     let pdf = build_image_pdf(&sample_jpeg_bytes(), 32, 20, 100.0);
-    let text = latin1(&pdf);
+    let text = ascii_view(&pdf);
     assert!(text.contains("/MediaBox [0 0 23 14]"), "{text}");
 
     // A 1×1 image still yields a legal (non-zero) page box.
-    let tiny = latin1(&build_image_pdf(&sample_jpeg_bytes(), 1, 1, 100.0));
+    let tiny = ascii_view(&build_image_pdf(&sample_jpeg_bytes(), 1, 1, 100.0));
     assert!(tiny.contains("/MediaBox [0 0 1 1]"), "{tiny}");
 
     // The content stream flips Y so the image is not mirrored.

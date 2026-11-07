@@ -169,7 +169,7 @@ jobs:
           echo "--- ui";      curl -fsS http://127.0.0.1:8099/ | grep -q "<!DOCTYPE html>" && echo ok
           echo "--- assets";  curl -fsS http://127.0.0.1:8099/assets/style.css | head -c 40; echo
           echo "--- 404";     curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8099/nope
-          echo "--- 415";     curl -s -o /dev/null -w '%{http_code}\n' -X POST -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:8099/api/process
+          echo "--- 400 (json body)"; curl -s -o /dev/null -w '%{http_code}\n' -X POST -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:8099/api/process
           echo "--- 400";     curl -s -X POST -F 'action=nope' http://127.0.0.1:8099/api/process; echo
           echo "--- 400b";    curl -s -X POST -F 'action=compress' -F 'quality=101' -F 'file=@/etc/hostname;type=image/png' http://127.0.0.1:8099/api/process; echo
           echo "--- not-multipart"; curl -s -o /dev/null -w '%{http_code}\n' -X POST -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:8099/api/process
@@ -185,11 +185,16 @@ jobs:
           echo "--- v1 store round trip"
           python3 -c '
           import struct, zlib
-          w = h = 48
-          rows = b"".join(b"\x00" + bytes(v for xy in ((x, y) for x in range(w)) for v in ((xy[0] * 5) % 256, (xy[1] * 7) % 256, 128)) for y in range(h))
+          w = h = 240
+          # Textured, not smooth: PNG has to spend real bits on it, so a quality-35 JPEG
+          # is guaranteed to win and the magic-byte check below means something.
+          def px(x, y):
+              n = (x * 73856093) ^ (y * 19349663)
+              return bytes((n % 251, (n // 7) % 249, (n // 13) % 245))
+          rows = b"".join(b"\x00" + b"".join(px(x, y) for x in range(w)) for y in range(h))
           def chunk(t, d):
               return struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d) & 0xFFFFFFFF)
-          png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(rows, 9)) + chunk(b"IEND", b"")
+          png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(rows, 6)) + chunk(b"IEND", b"")
           open("/tmp/px.png", "wb").write(png)
           print("made a", len(png), "byte png")
           '
