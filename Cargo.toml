@@ -1,0 +1,39 @@
+[package]
+name = "fileoptimize"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.77"
+description = "FileOptimize — a fast, memory-efficient file compression & conversion backend"
+license = "MIT"
+repository = "https://github.com/DigantaDey/FileOptimize.com"
+homepage = "https://fileoptimize.com"
+readme = "README.md"
+keywords = ["compression", "pdf", "image", "converter", "backend"]
+categories = ["web-programming::http-server"]
+
+[dependencies]
+axum = { version = "0.7", features = ["multipart"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "net", "process", "signal", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["io"] }
+tower-http = { version = "0.5", features = ["trace", "cors", "compression-gzip"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+# Decoders only (no default features) keeps the binary lean and the attack surface small.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif", "bmp", "tiff"] }
+# Archive writing only, with no compression backends: entries are stored (see processing/zip.rs).
+zip = { version = "2", default-features = false }
+
+[dev-dependencies]
+tower = { version = "0.4", features = ["util"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+# NOTE: unwind (not abort) is deliberate — a panic inside one request task must not
+# take down the whole service.
+panic = "unwind"

@@ -1,0 +1,142 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+
+jobs:
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Install PDF tooling
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ghostscript poppler-utils
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets -- -D warnings
+
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install PDF tooling (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ghostscript poppler-utils
+      - name: Install PDF tooling (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ghostscript poppler
+      - uses: Swatinem/rust-cache@v2
+      - name: Run tests
+        run: cargo test -- --nocapture
+
+  build:
+    name: Release build
+    needs: [fmt, clippy, test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release
+      - name: Build
+        run: cargo build --release --bin fileoptimize
+      - name: Binary size
+        run: ls -lh target/release/fileoptimize | awk '{print "release binary: " $5}'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fileoptimize-linux-x86_64
+          path: target/release/fileoptimize
+          retention-days: 14
+
+  smoke:
+    name: Smoke test (release binary)
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: fileoptimize-linux-x86_64
+          path: bin
+      - name: Install PDF tooling
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ghostscript poppler-utils
+      - run: chmod +x bin/fileoptimize
+      - name: Boot and exercise
+        env:
+          PORT: "8099"
+          TMP_DIR: ${{ github.workspace }}/tmp-smoke
+          RUST_LOG: info
+        run: |
+          set -euo pipefail
+          ./bin/fileoptimize &
+          pid=$!
+          for i in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:8099/api/health >/dev/null 2>&1 && break
+            sleep 1
+          done
+          echo "--- health"; curl -fsS http://127.0.0.1:8099/api/health; echo
+          echo "--- info";   curl -fsS http://127.0.0.1:8099/api/info; echo
+          echo "--- ui";     curl -fsS http://127.0.0.1:8099/ | grep -q "<!DOCTYPE html>" && echo ok
+          echo "--- 404";    curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8099/nope
+          echo "--- 400";    curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:8099/api/process
+          echo "--- 415";    curl -s -o /dev/null -w '%{http_code}\n' -X POST -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:8099/api/process
+          kill $pid
+
+  docker:
+    name: Docker image
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: fileoptimize:ci
+      - name: Container smoke test
+        run: |
+          set -euo pipefail
+          docker run -d --name fo -p 8123:8080 fileoptimize:ci
+          for i in $(seq 1 40); do
+            curl -fsS http://127.0.0.1:8123/api/health >/dev/null 2>&1 && break
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8123/api/health; echo
+          curl -fsS http://127.0.0.1:8123/api/info | grep -q ghostscript && echo "tool probe ok"
+          docker rm -f fo

@@ -1,0 +1,14 @@
+.git
+.github
+target
+tmp
+run
+*.log
+README.md
+LICENSE
+requirements.txt
+app.py
+static
+templates
+Dockerfile
+.dockerignore
