@@ -160,6 +160,74 @@ jobs:
           echo "--- 415";     curl -s -o /dev/null -w '%{http_code}\n' -X POST -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:8099/api/process
           echo "--- 400";     curl -s -X POST -F 'action=nope' http://127.0.0.1:8099/api/process; echo
           echo "--- 400b";    curl -s -X POST -F 'action=compress' -F 'quality=101' -F 'file=@/etc/hostname;type=image/png' http://127.0.0.1:8099/api/process; echo
+          echo "--- not-multipart"; curl -s -o /dev/null -w '%{http_code}\n' -X POST -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:8099/api/process
+
+          # ---- the versioned, machine-facing API on the real binary
+          echo "--- openapi spec"
+          curl -fsS http://127.0.0.1:8099/api/openapi.json | python3 -c \
+            'import json,sys; d=json.load(sys.stdin); missing=[r for r in ("/api/v1/process","/api/v1/results/{id}","/api/v1/info") if r not in d["paths"]]; assert not missing, missing; print("spec ok:", len(d["paths"]), "paths")'
+          echo "--- v1 info"
+          curl -fsS http://127.0.0.1:8099/api/v1/info | python3 -c \
+            'import json,sys; d=json.load(sys.stdin); assert d["quality_range"]==[1,100]; assert d["memory_budget_mb"]>0; assert "compress" in d["actions"]; print("info ok:", d["tools"], "budget", d["memory_budget_mb"], "MB")'
+
+          echo "--- v1 store round trip"
+          python3 -c '
+          import struct, zlib
+          w = h = 48
+          rows = b"".join(b"\x00" + bytes(v for xy in ((x, y) for x in range(w)) for v in ((xy[0] * 5) % 256, (xy[1] * 7) % 256, 128)) for y in range(h))
+          def chunk(t, d):
+              return struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d) & 0xFFFFFFFF)
+          png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(rows, 9)) + chunk(b"IEND", b"")
+          open("/tmp/px.png", "wb").write(png)
+          print("made a", len(png), "byte png")
+          '
+          curl -fsS -X POST -F "file=@/tmp/px.png" -F "action=compress" -F "quality=35" -F "store=1" \
+            http://127.0.0.1:8099/api/v1/process > /tmp/desc.json
+          cat /tmp/desc.json; echo
+          path=$(python3 -c 'import json;print(json.load(open("/tmp/desc.json"))["download_path"])')
+          size=$(python3 -c 'import json;print(json.load(open("/tmp/desc.json"))["output_size"])')
+          echo "--- refetch $path"
+          curl -fsS -o /tmp/again.jpg "http://127.0.0.1:8099$path"
+          test "$(stat -c%s /tmp/again.jpg)" = "$size" || { echo "size mismatch on refetch"; exit 1; }
+          head -c 2 /tmp/again.jpg | od -An -tx1 | grep -q 'ff d8' || { echo "not a jpeg"; exit 1; }
+          echo "--- discard"
+          curl -fsS -o /dev/null -w '%{http_code}\n' -X DELETE "http://127.0.0.1:8099$path"
+          curl -s -o /dev/null -w 'gone: %{http_code}\n' "http://127.0.0.1:8099$path"
+          echo "--- a bogus id is refused"
+          curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8099/api/v1/results/../../etc/passwd
+          echo "--- legacy alias still returns the file"
+          curl -fsS -D /tmp/h.txt -o /tmp/legacy.jpg -X POST -F "file=@/tmp/px.png" -F "action=compress" \
+            http://127.0.0.1:8099/upload
+          grep -qi '^x-output-size:' /tmp/h.txt || { echo "missing x-output-size"; exit 1; }
+          grep -qi '^content-disposition: attachment' /tmp/h.txt || { echo "missing disposition"; exit 1; }
+
+          echo "--- a bogus result id is refused before any disk access"
+          curl -s -o /dev/null -w '%{http_code}\n' "http://127.0.0.1:8099/api/v1/results/nope"
+
+          echo "--- a key-protected instance"
+          API_KEYS=smoke-secret-1 PORT=8098 ./bin/fileoptimize > /tmp/server-auth.log 2>&1 &
+          apid=$!
+          for i in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:8098/api/v1/health >/dev/null 2>&1 && break
+            sleep 1
+          done
+          expect() {
+            want=$1; label=$2; shift 2
+            got=$(curl -s -o /dev/null -w '%{http_code}' "$@")
+            if [ "$got" != "$want" ]; then
+              echo "$label: expected $want, got $got"
+              exit 1
+            fi
+            echo "$label: $got ok"
+          }
+          expect 401 "no key"    -X POST -F "file=@/tmp/px.png" http://127.0.0.1:8098/api/v1/process
+          expect 401 "bad key"   -X POST -H 'x-api-key: nope' -F "file=@/tmp/px.png" http://127.0.0.1:8098/api/v1/process
+          expect 200 "good key"  -X POST -H 'x-api-key: smoke-secret-1' -F "file=@/tmp/px.png" http://127.0.0.1:8098/api/v1/process
+          expect 200 "bearer"    -X POST -H 'Authorization: Bearer smoke-secret-1' -F "file=@/tmp/px.png" http://127.0.0.1:8098/api/v1/process
+          expect 200 "query key" -X POST -F "file=@/tmp/px.png" "http://127.0.0.1:8098/api/v1/process?api_key=smoke-secret-1"
+          expect 200 "info open" http://127.0.0.1:8098/api/v1/info
+          expect 404 "results need a real id" http://127.0.0.1:8098/api/v1/results/00000000000000000000000000000000
+          kill $apid
           kill $pid
           echo "--- server log"; cat /tmp/server.log
       - name: Keep the server log

@@ -440,10 +440,7 @@ impl Engine {
                 self.image_to_pdf(&mut prepared, &kind, &original_name)
                     .await?
             }
-            Action::PdfToImage => {
-                self.pdf_to_image(&prepared, &kind, &original_name)
-                    .await?
-            }
+            Action::PdfToImage => self.pdf_to_image(&prepared, &kind, &original_name).await?,
         };
 
         let original_size = prepared.size;

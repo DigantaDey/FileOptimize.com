@@ -157,8 +157,8 @@ async fn quality_is_respected_and_the_default_applies_when_omitted() {
     assert!(b < c, "{b} vs {c}");
     // The omitted case really did use the configured default of 20.
     assert_eq!(omitted.quality, 20);
-    let _ = std::fs::remove_dir_all(engine.config().tmp_dir);
-    let _ = std::fs::remove_dir_all(big_engine.config().tmp_dir);
+    let _ = std::fs::remove_dir_all(&engine.config().tmp_dir);
+    let _ = std::fs::remove_dir_all(&big_engine.config().tmp_dir);
 }
 
 #[tokio::test]
@@ -297,7 +297,7 @@ async fn a_decode_bigger_than_the_memory_budget_is_refused_not_attempted() {
     assert!(err.message().contains("MEMORY_BUDGET_MB"), "{err:?}");
     // Nothing was reserved permanently.
     assert_eq!(engine.available_memory_mb(), 16);
-    let _ = std::fs::remove_dir_all(engine.config().tmp_dir);
+    let _ = std::fs::remove_dir_all(&engine.config().tmp_dir);
 
     // With room to spare, the same file is accepted.
     let ok = test_config(8_000_000, 25_000_000);
