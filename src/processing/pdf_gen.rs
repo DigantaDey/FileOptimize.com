@@ -61,7 +61,9 @@ pub fn build_image_pdf(jpeg: &[u8], width: u32, height: u32, dpi: f64) -> Vec<u8
     // `q W 0 0 -H 0 H cm /Im0 Do Q` maps the unit-square image onto the whole page,
     // flipping Y so it renders upright instead of mirrored.
     let contents = format!("q {w} 0 0 {neg_h} 0 {h} cm /Im0 Do Q", neg_h = -(h as i64));
-    push_obj(&mut out, &mut offsets, 5, contents.as_bytes());
+    let len = contents.len();
+    let stream = format!("<</Length {len}>>\nstream\n{contents}\nendstream");
+    push_obj(&mut out, &mut offsets, 5, stream.as_bytes());
 
     // Cross-reference table.
     let xref_pos = out.len();

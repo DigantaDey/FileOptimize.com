@@ -372,7 +372,13 @@ async fn framework_body_limit_rejects_absurd_requests() {
     let huge = vec![7u8; 2 * 1024 * 1024];
     let body = multipart(&[("file", Some("huge.png"), &huge)]);
     let (status, _, _) = send(&app, post_process(body)).await;
-    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    // Refused either by our in-flight cap (413 with a precise message) or by the outer
+    // body guard, which aborts the stream mid-parse (400). Either way: a clean client
+    // error, no hang, and nothing left on disk.
+    assert!(
+        matches!(status, StatusCode::PAYLOAD_TOO_LARGE | StatusCode::BAD_REQUEST),
+        "unexpected status {status}"
+    );
     assert_eq!(
         leftovers(&root),
         0,
@@ -421,7 +427,9 @@ async fn rejects_a_non_multipart_post() {
         .body(Body::from("{}"))
         .unwrap();
     let (status, _, _) = send(&app, req).await;
-    assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    // A body that is not multipart at all is a malformed request (axum's own rejection,
+    // 400). 415 is reserved for a *file* whose content the action cannot use.
+    assert_eq!(status, StatusCode::BAD_REQUEST);
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -435,15 +443,34 @@ async fn names_survive_sanitising_in_the_download_header() {
     let (status, headers, out) = send(&app, post_process(body)).await;
     assert_eq!(status, StatusCode::OK, "{}", err_of(&out));
     let cd = hdr(&headers, header::CONTENT_DISPOSITION);
-    // Control characters, quotes and traversal must all be gone; only the two
-    // delimiting quotes of the filename parameter may remain.
-    assert_eq!(
-        cd,
-        "attachment; filename=\"evil- name--X- 1_optimized.jpg\""
-    );
+    // The embedded quote closes the multipart `filename` parameter early, so the name
+    // the server is handed is just `evil`. What must hold is that nothing hostile
+    // survives the round trip: no control characters, no traversal, no quote to break
+    // out of the quoted string with.
     assert!(!cd.contains(".."), "{cd}");
     assert!(!cd.contains('\n') && !cd.contains('\r'), "{cd}");
+    assert!(!cd.contains('/'), "{cd}");
     assert_eq!(cd.matches('"').count(), 2, "{cd}");
+    assert!(cd.starts_with("attachment; filename=\""), "{cd}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn rewrites_a_traversal_filename_in_the_download_header() {
+    let (app, root) = build_app(test_config(4 * 1024 * 1024, 1_000_000));
+    let body = multipart(&[
+        ("action", None, b"compress"),
+        ("quality", None, b"50"),
+        ("file", Some("../../secret dir/photo.png"), &png()),
+    ]);
+    let (status, headers, out) = send(&app, post_process(body)).await;
+    assert_eq!(status, StatusCode::OK, "{}", err_of(&out));
+    // Path components and leading dots dropped, the (header-safe) space kept, suffix
+    // appended — exactly what the download is named.
+    assert_eq!(
+        hdr(&headers, header::CONTENT_DISPOSITION),
+        "attachment; filename=\"secret dir-photo_optimized.jpg\""
+    );
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -514,9 +541,11 @@ async fn uses_the_default_quality_when_none_is_sent() {
     let mut cfg = test_config(4 * 1024 * 1024, 1_000_000);
     cfg.compression_default_quality = 20;
     let (app, root) = build_app(cfg);
+    // JPEG in, JPEG out at both ends, so quality is the only variable. (A PNG source
+    // at quality >= 90 is kept losslessly as PNG — covered by another test.)
     let body = multipart(&[
         ("action", None, b"compress"),
-        ("file", Some("a.png"), &png()),
+        ("file", Some("a.jpg"), &jpeg()),
     ]);
     let (status, _, low) = send(&app, post_process(body)).await;
     assert_eq!(status, StatusCode::OK);
@@ -527,7 +556,7 @@ async fn uses_the_default_quality_when_none_is_sent() {
     let (app, root_hi) = build_app(cfg);
     let body = multipart(&[
         ("action", None, b"compress"),
-        ("file", Some("a.png"), &png()),
+        ("file", Some("a.jpg"), &jpeg()),
     ]);
     let (status, _, high) = send(&app, post_process(body)).await;
     assert_eq!(status, StatusCode::OK);

@@ -262,6 +262,21 @@ fn image_pdf_has_valid_structure_and_xref_offsets() {
         "startxref does not point at xref"
     );
 
+    // The content stream needs its own exact /Length too — poppler refuses pages
+    // without it (ghostscript is lenient, which is how this slipped before).
+    let obj5 = text.rfind("5 0 obj").expect("object 5");
+    let rest = &text[obj5..];
+    let l_at = rest.find("/Length ").expect("content length");
+    let declared: usize = rest[l_at + 8..]
+        .split_whitespace()
+        .next()
+        .and_then(|v| v.trim_end_matches('>').parse().ok())
+        .expect("content length int");
+    let s_start = rest.find("\nstream\n").expect("content stream") + 8;
+    let s_end = rest.find("\nendstream").expect("endstream");
+    assert_eq!(declared, s_end - s_start, "content stream /Length mismatch");
+    assert!(rest[s_start..s_end].starts_with("q "), "{rest}");
+
     // Every recorded offset must land exactly on its object header.
     let table = &text[offset..];
     let mut lines = table.lines().skip(3); // "xref", size, free entry
