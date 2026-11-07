@@ -11,7 +11,9 @@ use fileoptimize::sanitize::{extension_of, sanitize_ext, sanitize_filename};
 
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::PngEncoder;
-use image::{ExtendedColorType, GenericImageView, ImageBuffer, ImageEncoder, ImageFormat, Rgb, RgbImage};
+use image::{
+    ExtendedColorType, ImageBuffer, ImageEncoder, ImageFormat, Rgb, RgbImage,
+};
 
 /// A deterministic 32×20 RGB gradient — small enough to keep the suite instant.
 fn sample_image() -> RgbImage {
@@ -144,7 +146,9 @@ fn quality_bounds_are_enforced() {
     assert_eq!(parse_quality(Some("  100  "), 60).unwrap(), 100);
     assert_eq!(parse_quality(Some("1"), 60).unwrap(), 1);
     assert_eq!(parse_quality(Some("25"), 60).unwrap(), 25);
-    for bad in ["0", "-1", "101", "255", "abc", "50.5", "1e2", "٩٩", "+5", "50%"] {
+    for bad in [
+        "0", "-1", "101", "255", "abc", "50.5", "1e2", "٩٩", "+5", "50%",
+    ] {
         assert!(
             parse_quality(Some(bad), 60).is_err(),
             "quality {bad:?} should be rejected"
@@ -170,11 +174,26 @@ fn pixel_budget_rejects_oversized_images() {
 
 #[test]
 fn format_selection_stays_lossless_only_at_high_quality() {
-    assert_eq!(pick_compress_format(ImageFormat::Jpeg, 10), ImageFormat::Jpeg);
-    assert_eq!(pick_compress_format(ImageFormat::Png, 100), ImageFormat::Png);
-    assert_eq!(pick_compress_format(ImageFormat::Png, 89), ImageFormat::Jpeg);
-    assert_eq!(pick_compress_format(ImageFormat::WebP, 80), ImageFormat::Jpeg);
-    assert_eq!(pick_compress_format(ImageFormat::Gif, 99), ImageFormat::Jpeg);
+    assert_eq!(
+        pick_compress_format(ImageFormat::Jpeg, 10),
+        ImageFormat::Jpeg
+    );
+    assert_eq!(
+        pick_compress_format(ImageFormat::Png, 100),
+        ImageFormat::Png
+    );
+    assert_eq!(
+        pick_compress_format(ImageFormat::Png, 89),
+        ImageFormat::Jpeg
+    );
+    assert_eq!(
+        pick_compress_format(ImageFormat::WebP, 80),
+        ImageFormat::Jpeg
+    );
+    assert_eq!(
+        pick_compress_format(ImageFormat::Gif, 99),
+        ImageFormat::Jpeg
+    );
 }
 
 // ---------------------------------------------------------------- encoders
@@ -225,7 +244,10 @@ fn image_pdf_has_valid_structure_and_xref_offsets() {
 
     // /Length must match the stream payload exactly or viewers reject the file.
     let at = text.find("/Length ").expect("length key");
-    let len_str = text[at + 8..].split_whitespace().next().expect("len digits");
+    let len_str = text[at + 8..]
+        .split_whitespace()
+        .next()
+        .expect("len digits");
     assert_eq!(len_str.parse::<usize>().expect("len int"), jpeg.len());
 
     // startxref must point at the real xref table.
@@ -339,7 +361,9 @@ async fn sweeper_removes_only_expired_dirs() {
     // Sweeping a missing/empty dir is a no-op, never an error.
     assert_eq!(fileoptimize::cleanup::sweep(&fresh, 0).await.unwrap(), 0);
     assert_eq!(
-        fileoptimize::cleanup::sweep(&root.join("nope"), 0).await.unwrap(),
+        fileoptimize::cleanup::sweep(&root.join("nope"), 0)
+            .await
+            .unwrap(),
         0
     );
 

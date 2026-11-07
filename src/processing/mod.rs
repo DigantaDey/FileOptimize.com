@@ -90,8 +90,8 @@ pub async fn read_header(path: &std::path::Path, n: usize) -> AppResult<Vec<u8>>
 /// This is the key defence against decompression-bomb style inputs: we never allocate
 /// the full pixel buffer for an image whose declared dimensions exceed the cap.
 pub fn decode_checked(data: &[u8], fmt: ImageFormat, max_pixels: u32) -> AppResult<DynamicImage> {
-    let (w, h) = ::image::ImageReader::with_format(std::io::Cursor::new(data), fmt)
-        .into_dimensions()?;
+    let (w, h) =
+        ::image::ImageReader::with_format(std::io::Cursor::new(data), fmt).into_dimensions()?;
     check_dimensions(w, h, max_pixels)?;
     Ok(::image::load_from_memory_with_format(data, fmt)?)
 }
@@ -172,7 +172,9 @@ pub fn parse_quality(raw: Option<&str>, default: u8) -> AppResult<u8> {
         return Ok(default);
     }
     let v: i64 = s.parse().map_err(|_| {
-        AppError::BadRequest(format!("invalid quality '{s}': must be an integer between 1 and 100"))
+        AppError::BadRequest(format!(
+            "invalid quality '{s}': must be an integer between 1 and 100"
+        ))
     })?;
     if !(1..=100).contains(&v) {
         return Err(AppError::BadRequest(format!(

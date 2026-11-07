@@ -8,7 +8,9 @@ use tracing_subscriber::EnvFilter;
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
         .init();
 
     let config = Config::from_env();
@@ -35,7 +37,10 @@ async fn main() {
         }
     };
 
-    tracing::info!("FileOptimize {} listening on http://{addr}", env!("CARGO_PKG_VERSION"));
+    tracing::info!(
+        "FileOptimize {} listening on http://{addr}",
+        env!("CARGO_PKG_VERSION")
+    );
     tracing::info!(tmp_dir = %tmp_dir.display(), "serving from temp dir");
 
     axum::serve(listener, app)

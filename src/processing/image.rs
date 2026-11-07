@@ -7,7 +7,7 @@
 
 use ::image::codecs::jpeg::JpegEncoder;
 use ::image::codecs::png::PngEncoder;
-use ::image::{DynamicImage, ExtendedColorType, GenericImageView, ImageEncoder, ImageFormat};
+use ::image::{DynamicImage, ExtendedColorType, ImageEncoder, ImageFormat};
 
 use crate::error::AppResult;
 
@@ -31,8 +31,12 @@ pub fn encode_image(img: DynamicImage, format: ImageFormat, quality: u8) -> AppR
         }
         // Everything else we offer is JPEG, whose encoder honours 1..=100 quality.
         _ => {
-            JpegEncoder::new_with_quality(&mut out, quality)
-                .write_image(raw, w, h, ExtendedColorType::Rgb8)?;
+            JpegEncoder::new_with_quality(&mut out, quality).write_image(
+                raw,
+                w,
+                h,
+                ExtendedColorType::Rgb8,
+            )?;
         }
     }
     Ok(out)

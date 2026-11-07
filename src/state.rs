@@ -33,7 +33,10 @@ impl AppState {
     pub async fn new_workdir(&self) -> AppResult<WorkDir> {
         let dir = self.tmp_dir.join(uuid::Uuid::new_v4().simple().to_string());
         tokio::fs::create_dir_all(&dir).await?;
-        Ok(WorkDir { path: dir, keep: false })
+        Ok(WorkDir {
+            path: dir,
+            keep: false,
+        })
     }
 }
 

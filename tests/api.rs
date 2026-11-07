@@ -8,7 +8,7 @@ use axum::body::Body;
 use axum::http::{header, HeaderName, HeaderValue, Request, StatusCode};
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::PngEncoder;
-use image::{ExtendedColorType, GenericImageView, ImageBuffer, ImageEncoder, Rgb};
+use image::{ExtendedColorType, ImageBuffer, ImageEncoder, Rgb};
 use tower::ServiceExt;
 
 use fileoptimize::config::Config;
@@ -54,8 +54,10 @@ fn multipart(fields: &[(&str, Option<&str>, &[u8])]) -> Vec<u8> {
         body.extend_from_slice(format!("--{BOUNDARY}\r\n").as_bytes());
         match filename {
             Some(f) => body.extend_from_slice(
-                format!("Content-Disposition: form-data; name=\"{name}\"; filename=\"{f}\"\r\n\r\n")
-                    .as_bytes(),
+                format!(
+                    "Content-Disposition: form-data; name=\"{name}\"; filename=\"{f}\"\r\n\r\n"
+                )
+                .as_bytes(),
             ),
             None => body.extend_from_slice(
                 format!("Content-Disposition: form-data; name=\"{name}\"\r\n\r\n").as_bytes(),
@@ -94,7 +96,10 @@ async fn send(app: &axum::Router, req: Request<Body>) -> Reply {
 }
 
 fn hdr(h: &axum::http::HeaderMap, name: header::HeaderName) -> String {
-    h.get(name).and_then(|v| v.to_str().ok()).unwrap_or_default().to_string()
+    h.get(name)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string()
 }
 
 fn err_of(bytes: &[u8]) -> String {
@@ -141,13 +146,18 @@ fn leftovers(root: &std::path::Path) -> usize {
 #[tokio::test]
 async fn health_and_info_report_the_limits() {
     let (app, root) = app(test_config(1024 * 1024, 1_000_000));
-    let (status, _, body) = send(&app, Request::get("/api/health").body(Body::empty()).unwrap()).await;
+    let (status, _, body) = send(
+        &app,
+        Request::get("/api/health").body(Body::empty()).unwrap(),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(v["status"].as_str(), Some("ok"));
     assert_eq!(v["service"].as_str(), Some("fileoptimize"));
 
-    let (status, _, body) = send(&app, Request::get("/api/info").body(Body::empty()).unwrap()).await;
+    let (status, _, body) =
+        send(&app, Request::get("/api/info").body(Body::empty()).unwrap()).await;
     assert_eq!(status, StatusCode::OK);
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(v["max_upload_size"].as_u64(), Some(1024 * 1024));
@@ -166,13 +176,18 @@ async fn the_router_with_middleware_serves_the_page() {
     let cfg = test_config(1024 * 1024, 1_000_000);
     let root = cfg.tmp_dir.clone();
     let app = fileoptimize::create_app(AppState::new(cfg));
-    let resp = app.oneshot(Request::get("/").body(Body::empty()).unwrap()).await.unwrap();
+    let resp = app
+        .oneshot(Request::get("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(
         resp.headers()[header::CONTENT_TYPE].to_str().unwrap(),
         "text/html; charset=utf-8"
     );
-    let body = axum::body::to_bytes(resp.into_body(), 4 * 1024 * 1024).await.unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), 4 * 1024 * 1024)
+        .await
+        .unwrap();
     let text = String::from_utf8_lossy(&body).to_string();
     assert!(text.contains("<!DOCTYPE html>"));
     assert!(text.contains("FileOptimize"));
@@ -187,9 +202,14 @@ async fn serves_the_single_page_ui() {
         ("/", "<!DOCTYPE html>", "text/html"),
         ("/index.html", "id=\"upload-form\"", "text/html"),
         ("/assets/style.css", "--bg:", "text/css"),
-        ("/assets/script.js", "/api/process", "application/javascript"),
+        (
+            "/assets/script.js",
+            "/api/process",
+            "application/javascript",
+        ),
     ] {
-        let (status, headers, body) = send(&app, Request::get(uri).body(Body::empty()).unwrap()).await;
+        let (status, headers, body) =
+            send(&app, Request::get(uri).body(Body::empty()).unwrap()).await;
         assert_eq!(status, StatusCode::OK, "{uri}");
         let text = String::from_utf8_lossy(&body).to_string();
         assert!(text.contains(needle), "{uri} missing {needle:?}");
@@ -238,19 +258,26 @@ async fn rejects_empty_uploads() {
 #[tokio::test]
 async fn rejects_unknown_actions() {
     let (app, root) = app(test_config(1024 * 1024, 1_000_000));
-    let body = multipart(&[
-        ("action", None, b"rm_-rf"),
-        ("file", Some("a.png"), &png()),
-    ]);
+    let body = multipart(&[("action", None, b"rm_-rf"), ("file", Some("a.png"), &png())]);
     let (status, _, bytes) = send(&app, post_process(body)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(err_of(&bytes).contains("invalid action"), "{}", err_of(&bytes));
+    assert!(
+        err_of(&bytes).contains("invalid action"),
+        "{}",
+        err_of(&bytes)
+    );
     let _ = std::fs::remove_dir_all(root);
 }
 
 #[tokio::test]
 async fn rejects_out_of_range_quality() {
-    for (q, rejected) in [("0", true), ("101", true), ("ninety", true), ("-5", true), ("50", false)] {
+    for (q, rejected) in [
+        ("0", true),
+        ("101", true),
+        ("ninety", true),
+        ("-5", true),
+        ("50", false),
+    ] {
         let (app, root) = app(test_config(4 * 1024 * 1024, 1_000_000));
         let body = multipart(&[
             ("action", None, b"compress"),
@@ -274,7 +301,11 @@ async fn rejects_non_image_for_image_to_pdf() {
     let (app, root) = app(test_config(1024 * 1024, 1_000_000));
     let body = multipart(&[
         ("action", None, b"image_to_pdf"),
-        ("file", Some("notes.txt"), b"plain text, definitely not an image"),
+        (
+            "file",
+            Some("notes.txt"),
+            b"plain text, definitely not an image",
+        ),
     ]);
     let (status, _, bytes) = send(&app, post_process(body)).await;
     assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
@@ -291,7 +322,11 @@ async fn rejects_pdf_for_image_to_pdf() {
     ]);
     let (status, _, bytes) = send(&app, post_process(body)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(err_of(&bytes).contains("already a PDF"), "{}", err_of(&bytes));
+    assert!(
+        err_of(&bytes).contains("already a PDF"),
+        "{}",
+        err_of(&bytes)
+    );
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -337,7 +372,11 @@ async fn framework_body_limit_rejects_absurd_requests() {
     let body = multipart(&[("file", Some("huge.png"), &huge)]);
     let (status, _, _) = send(&app, post_process(body)).await;
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
-    assert_eq!(leftovers(&root), 0, "temp dirs leaked after an over-limit body");
+    assert_eq!(
+        leftovers(&root),
+        0,
+        "temp dirs leaked after an over-limit body"
+    );
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -365,7 +404,11 @@ async fn rejects_mislabelled_files() {
     ]);
     let (status, _, bytes) = send(&app, post_process(body)).await;
     assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
-    assert!(err_of(&bytes).contains("images and PDFs"), "{}", err_of(&bytes));
+    assert!(
+        err_of(&bytes).contains("images and PDFs"),
+        "{}",
+        err_of(&bytes)
+    );
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -393,7 +436,10 @@ async fn names_survive_sanitising_in_the_download_header() {
     let cd = hdr(&headers, header::CONTENT_DISPOSITION);
     // Control characters, quotes and traversal must all be gone; only the two
     // delimiting quotes of the filename parameter may remain.
-    assert_eq!(cd, "attachment; filename=\"evil- name--X- 1_optimized.jpg\"");
+    assert_eq!(
+        cd,
+        "attachment; filename=\"evil- name--X- 1_optimized.jpg\""
+    );
     assert!(!cd.contains(".."), "{cd}");
     assert!(!cd.contains('\n') && !cd.contains('\r'), "{cd}");
     assert_eq!(cd.matches('"').count(), 2, "{cd}");
@@ -420,8 +466,14 @@ async fn compresses_a_png_to_jpeg_and_reports_sizes() {
         "attachment; filename=\"holiday_optimized.jpg\""
     );
     assert_eq!(hdr(&headers, header::CONTENT_LENGTH), out.len().to_string());
-    assert_eq!(hdr(&headers, HeaderName::from_static("x-original-size")), original.len().to_string());
-    assert_eq!(hdr(&headers, HeaderName::from_static("x-output-size")), out.len().to_string());
+    assert_eq!(
+        hdr(&headers, HeaderName::from_static("x-original-size")),
+        original.len().to_string()
+    );
+    assert_eq!(
+        hdr(&headers, HeaderName::from_static("x-output-size")),
+        out.len().to_string()
+    );
     assert!(out.starts_with(&[0xFF, 0xD8]), "not a jpeg stream");
 
     // The result decodes and keeps its geometry.
@@ -429,7 +481,11 @@ async fn compresses_a_png_to_jpeg_and_reports_sizes() {
     assert_eq!((img.width(), img.height()), (24, 16));
 
     // In-memory results free their working directory immediately.
-    assert_eq!(leftovers(&root), 0, "temp dirs leaked after a successful compress");
+    assert_eq!(
+        leftovers(&root),
+        0,
+        "temp dirs leaked after a successful compress"
+    );
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -490,12 +546,18 @@ async fn wraps_an_image_in_a_pdf() {
     let (status, headers, out) = send(&app, post_process(body)).await;
     assert_eq!(status, StatusCode::OK, "{}", err_of(&out));
     assert_eq!(hdr(&headers, header::CONTENT_TYPE), "application/pdf");
-    assert_eq!(hdr(&headers, header::CONTENT_DISPOSITION), "attachment; filename=\"scan.pdf\"");
+    assert_eq!(
+        hdr(&headers, header::CONTENT_DISPOSITION),
+        "attachment; filename=\"scan.pdf\""
+    );
     assert!(out.starts_with(b"%PDF-1.4"));
     assert!(out.windows(5).any(|w| w == b"%%EOF"));
 
     let text: String = out.iter().map(|b| *b as char).collect();
-    assert!(text.contains("/Filter /DCTDecode"), "image not embedded as DCTDecode");
+    assert!(
+        text.contains("/Filter /DCTDecode"),
+        "image not embedded as DCTDecode"
+    );
     assert!(text.contains("/MediaBox [0 0 17 12]"), "{text}");
     let _ = std::fs::remove_dir_all(root);
 }
@@ -563,13 +625,22 @@ async fn pdf_tools_either_work_or_are_reported_as_missing() {
                 "attachment; filename=\"doc_compressed.pdf\""
             );
             assert!(out.starts_with(b"%PDF-"), "compressed output is not a PDF");
-            assert_eq!(hdr(&headers, HeaderName::from_static("x-original-size")), pdf.len().to_string());
-            assert_eq!(hdr(&headers, HeaderName::from_static("x-output-size")), out.len().to_string());
+            assert_eq!(
+                hdr(&headers, HeaderName::from_static("x-original-size")),
+                pdf.len().to_string()
+            );
+            assert_eq!(
+                hdr(&headers, HeaderName::from_static("x-output-size")),
+                out.len().to_string()
+            );
         }
         StatusCode::SERVICE_UNAVAILABLE => {
             assert!(err_of(&out).contains("ghostscript"), "{}", err_of(&out));
         }
-        other => panic!("unexpected status from PDF compress: {other} — {}", err_of(&out)),
+        other => panic!(
+            "unexpected status from PDF compress: {other} — {}",
+            err_of(&out)
+        ),
     }
 
     // pdf_to_image
@@ -581,9 +652,15 @@ async fn pdf_tools_either_work_or_are_reported_as_missing() {
     match status {
         StatusCode::OK => {
             let ct = hdr(&headers, header::CONTENT_TYPE);
-            assert!(ct == "image/png" || ct == "application/zip", "unexpected type {ct}");
+            assert!(
+                ct == "image/png" || ct == "application/zip",
+                "unexpected type {ct}"
+            );
             if ct == "image/png" {
-                assert!(out.starts_with(&[0x89, b'P', b'N', b'G']), "not a PNG stream");
+                assert!(
+                    out.starts_with(&[0x89, b'P', b'N', b'G']),
+                    "not a PNG stream"
+                );
             } else {
                 assert!(out.starts_with(b"PK"), "not a ZIP stream");
             }
@@ -591,11 +668,18 @@ async fn pdf_tools_either_work_or_are_reported_as_missing() {
         StatusCode::SERVICE_UNAVAILABLE => {
             assert!(err_of(&out).contains("poppler"), "{}", err_of(&out));
         }
-        other => panic!("unexpected status from PDF→image: {other} — {}", err_of(&out)),
+        other => panic!(
+            "unexpected status from PDF→image: {other} — {}",
+            err_of(&out)
+        ),
     }
 
     // A streamed result is intentionally left for the TTL sweeper.
-    assert!(leftovers(&root) <= 2, "unexpected temp growth: {}", leftovers(&root));
+    assert!(
+        leftovers(&root) <= 2,
+        "unexpected temp growth: {}",
+        leftovers(&root)
+    );
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -640,7 +724,9 @@ async fn concurrent_jobs_are_gated_but_all_complete() {
             ]);
             let resp = app.oneshot(post_process(body)).await.expect("call");
             let status = resp.status();
-            let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+            let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
             (status, bytes.len())
         }));
     }

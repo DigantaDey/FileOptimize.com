@@ -30,8 +30,18 @@ pub fn build_image_pdf(jpeg: &[u8], width: u32, height: u32, dpi: f64) -> Vec<u8
     out.extend_from_slice(b"%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
 
     // 1 catalog, 2 pages, 3 page, 4 image XObject, 5 content stream.
-    push_obj(&mut out, &mut offsets, 1, b"<</Type /Catalog /Pages 2 0 R>>");
-    push_obj(&mut out, &mut offsets, 2, b"<</Type /Pages /Kids [3 0 R] /Count 1>>");
+    push_obj(
+        &mut out,
+        &mut offsets,
+        1,
+        b"<</Type /Catalog /Pages 2 0 R>>",
+    );
+    push_obj(
+        &mut out,
+        &mut offsets,
+        2,
+        b"<</Type /Pages /Kids [3 0 R] /Count 1>>",
+    );
 
     let page_body = format!(
         "<</Type /Page /Parent 2 0 R /MediaBox [0 0 {w} {h}] /Resources <</XObject <</Im0 4 0 R>>>> /Contents 5 0 R>>"

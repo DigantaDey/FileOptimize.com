@@ -46,8 +46,14 @@ pub fn router(state: AppState) -> Router {
         .route("/api/health", get(health))
         .route("/api/info", get(info))
         // `/upload` is kept as a legacy alias so existing clients keep working.
-        .route("/upload", post(process).layer(DefaultBodyLimit::max(body_limit)))
-        .route("/api/process", post(process).layer(DefaultBodyLimit::max(body_limit)))
+        .route(
+            "/upload",
+            post(process).layer(DefaultBodyLimit::max(body_limit)),
+        )
+        .route(
+            "/api/process",
+            post(process).layer(DefaultBodyLimit::max(body_limit)),
+        )
         .fallback(not_found)
         .with_state(state)
 }
@@ -74,7 +80,10 @@ async fn style_css() -> impl IntoResponse {
 
 async fn script_js() -> impl IntoResponse {
     (
-        [(header::CONTENT_TYPE, "application/javascript; charset=utf-8")],
+        [(
+            header::CONTENT_TYPE,
+            "application/javascript; charset=utf-8",
+        )],
         include_str!("../web/script.js"),
     )
 }
@@ -208,18 +217,26 @@ async fn run_job(state: &AppState, multipart: &mut Multipart) -> AppResult<Respo
         }
     }
 
-    let input_path = input_path.ok_or_else(|| AppError::BadRequest("no file provided".to_string()))?;
+    let input_path =
+        input_path.ok_or_else(|| AppError::BadRequest("no file provided".to_string()))?;
     let action = Action::parse(&action_raw)?;
-    let quality = parse_quality(quality_raw.as_deref(), state.config.compression_default_quality)?;
+    let quality = parse_quality(
+        quality_raw.as_deref(),
+        state.config.compression_default_quality,
+    )?;
 
     // Sniff only a header: enough to route the job, and it never loads a big PDF in full.
     let head = read_header(&input_path, 64).await?;
     let kind = detect(&head);
 
     let mut output = match action {
-        Action::Compress => compress(&input_path, &kind, quality, &original_name, &work, state).await?,
+        Action::Compress => {
+            compress(&input_path, &kind, quality, &original_name, &work, state).await?
+        }
         Action::ImageToPdf => image_to_pdf(&input_path, &kind, &original_name, state).await?,
-        Action::PdfToImage => pdf_to_image(&input_path, &kind, &original_name, &work, state).await?,
+        Action::PdfToImage => {
+            pdf_to_image(&input_path, &kind, &original_name, &work, state).await?
+        }
     };
 
     // Must be sampled *before* the response consumes the output: a payload that is being
@@ -237,7 +254,11 @@ async fn run_job(state: &AppState, multipart: &mut Multipart) -> AppResult<Respo
 
 /// Copy one multipart field to disk in chunks, enforcing the size cap as it goes.
 /// The upload is never fully buffered in memory.
-async fn stream_to_disk(mut field: axum::extract::multipart::Field<'_>, path: &Path, max_bytes: u64) -> AppResult<u64> {
+async fn stream_to_disk(
+    mut field: axum::extract::multipart::Field<'_>,
+    path: &Path,
+    max_bytes: u64,
+) -> AppResult<u64> {
     let mut file = tokio::fs::File::create(path).await?;
     let mut written: u64 = 0;
     while let Some(chunk) = field.chunk().await? {
@@ -353,7 +374,11 @@ async fn image_to_pdf(
     .map_err(join_err)??;
 
     let base = base_name(original_name);
-    Ok(Output::in_memory(pdf, format!("{base}.pdf"), "application/pdf"))
+    Ok(Output::in_memory(
+        pdf,
+        format!("{base}.pdf"),
+        "application/pdf",
+    ))
 }
 
 /// `pdf_to_image` — rasterise pages. One page becomes a PNG, many become a streamed ZIP.
@@ -370,11 +395,20 @@ async fn pdf_to_image(
         ));
     }
     if !pdftoppm_available().await {
-        return Err(external_tool_missing("poppler-utils", "PDF→image conversion"));
+        return Err(external_tool_missing(
+            "poppler-utils",
+            "PDF→image conversion",
+        ));
     }
 
     let img_dir = work.join("pages");
-    let files = pdf_to_images(input, &img_dir, state.config.pdf_raster_dpi, tool_timeout(state)).await?;
+    let files = pdf_to_images(
+        input,
+        &img_dir,
+        state.config.pdf_raster_dpi,
+        tool_timeout(state),
+    )
+    .await?;
     let base = base_name(original_name);
 
     if files.len() == 1 {
@@ -386,7 +420,11 @@ async fn pdf_to_image(
             let _ = tokio::fs::remove_file(&only).await;
         }
         let _ = tokio::fs::remove_dir(&img_dir).await;
-        return Ok(Output::from_path(out_path, format!("{base}.png"), "image/png"));
+        return Ok(Output::from_path(
+            out_path,
+            format!("{base}.png"),
+            "image/png",
+        ));
     }
 
     let entries: Vec<(String, PathBuf)> = files
@@ -431,26 +469,50 @@ fn join_err(e: tokio::task::JoinError) -> AppError {
 // Response assembly
 // ---------------------------------------------------------------------------
 
-fn build_download_response(out: &mut Output, original_size: u64, original_name: &str) -> AppResult<Response> {
+fn build_download_response(
+    out: &mut Output,
+    original_size: u64,
+    original_name: &str,
+) -> AppResult<Response> {
     let output_size = out.size();
 
     let mut headers = HeaderMap::new();
-    insert_header(&mut headers, header::CONTENT_TYPE, &out.content_type, "application/octet-stream");
+    insert_header(
+        &mut headers,
+        header::CONTENT_TYPE,
+        &out.content_type,
+        "application/octet-stream",
+    );
     insert_header(
         &mut headers,
         header::CONTENT_DISPOSITION,
         &format!("attachment; filename=\"{}\"", out.filename),
         "attachment",
     );
-    insert_header(&mut headers, HeaderName::from_static("x-original-size"), &original_size.to_string(), "0");
-    insert_header(&mut headers, HeaderName::from_static("x-output-size"), &output_size.to_string(), "0");
+    insert_header(
+        &mut headers,
+        HeaderName::from_static("x-original-size"),
+        &original_size.to_string(),
+        "0",
+    );
+    insert_header(
+        &mut headers,
+        HeaderName::from_static("x-output-size"),
+        &output_size.to_string(),
+        "0",
+    );
     insert_header(
         &mut headers,
         HeaderName::from_static("x-original-filename"),
         original_name,
         "file",
     );
-    insert_header(&mut headers, header::CONTENT_LENGTH, &output_size.to_string(), "0");
+    insert_header(
+        &mut headers,
+        header::CONTENT_LENGTH,
+        &output_size.to_string(),
+        "0",
+    );
     insert_header(
         &mut headers,
         header::ACCESS_CONTROL_EXPOSE_HEADERS,

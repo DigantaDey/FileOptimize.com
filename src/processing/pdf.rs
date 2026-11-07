@@ -61,7 +61,7 @@ async fn wait_capped(
     };
 
     let text = match stderr {
-        Some(fut) => fut.await.unwrap_or_default(),
+        Some(fut) => fut.await,
         None => String::new(),
     };
     Ok((status, text))
@@ -106,7 +106,10 @@ pub async fn compress_pdf(
         .arg("-dQUIET")
         .arg("-dSAFER")
         .arg("-dDetectDuplicateImages=true")
-        .arg(format!("-dColorImageResolution={}", 72 + u32::from(quality) * 3))
+        .arg(format!(
+            "-dColorImageResolution={}",
+            72 + u32::from(quality) * 3
+        ))
         .arg(format!("-sOutputFile={}", output.display()))
         .arg("--")
         .arg(input)
@@ -118,7 +121,8 @@ pub async fn compress_pdf(
         .map_err(|e| {
             tracing::warn!(?e, "ghostscript not runnable");
             AppError::ExternalToolMissing(
-                "ghostscript (`gs`) is required for PDF compression but is not installed".to_string(),
+                "ghostscript (`gs`) is required for PDF compression but is not installed"
+                    .to_string(),
             )
         })?;
 
@@ -129,7 +133,10 @@ pub async fn compress_pdf(
             "ghostscript could not process this PDF (it may be damaged or encrypted)".to_string(),
         ));
     }
-    let out_len = tokio::fs::metadata(output).await.map(|m| m.len()).unwrap_or(0);
+    let out_len = tokio::fs::metadata(output)
+        .await
+        .map(|m| m.len())
+        .unwrap_or(0);
     if out_len == 0 {
         return Err(AppError::Internal(
             "ghostscript produced no output for this PDF".to_string(),
@@ -163,7 +170,8 @@ pub async fn pdf_to_images(
         .map_err(|e| {
             tracing::warn!(?e, "pdftoppm not runnable");
             AppError::ExternalToolMissing(
-                "poppler-utils (`pdftoppm`) is required for PDF→image but is not installed".to_string(),
+                "poppler-utils (`pdftoppm`) is required for PDF→image but is not installed"
+                    .to_string(),
             )
         })?;
 

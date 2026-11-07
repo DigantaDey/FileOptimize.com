@@ -44,7 +44,8 @@ impl Config {
             port: env_parsed("PORT", 8080),
             tmp_dir: env_path("TMP_DIR", PathBuf::from("./tmp")),
             max_upload_size: max_upload_mb * 1024 * 1024,
-            max_image_pixels: env_parsed("MAX_IMAGE_PIXELS", 25_000_000).clamp(MIN_PIXELS, MAX_PIXELS),
+            max_image_pixels: env_parsed("MAX_IMAGE_PIXELS", 25_000_000)
+                .clamp(MIN_PIXELS, MAX_PIXELS),
             cleanup_ttl_secs: env_parsed("CLEANUP_TTL_SECS", 1800).clamp(60, 86_400),
             max_concurrent: env_parsed("MAX_CONCURRENT", 4).clamp(1, 64),
             compression_default_quality: env_parsed("DEFAULT_QUALITY", 60u8).clamp(1, 100),
