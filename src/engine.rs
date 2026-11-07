@@ -879,7 +879,7 @@ impl Prepared {
                 // BufReader<File>, not Cursor<File>: a file is seekable, while
                 // Cursor<File> satisfies neither BufRead nor Seek.
                 let path = self.input_file()?;
-                let file = std::io::BufReader::open(path)?;
+                let file = std::io::BufReader::new(std::fs::File::open(path)?);
                 let reader = ::image::ImageReader::with_format(file, fmt);
                 reader.into_dimensions()?
             }
