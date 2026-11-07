@@ -323,7 +323,7 @@
         "type": "string",
         "enum": ["compress", "image_to_pdf", "pdf_to_image"],
         "default": "compress",
-        "description": "`compress` re-encodes an image at `quality` or re-distils a PDF with Ghostscript; `image_to_pdf` wraps one image in a page; `pdf_to_image` rasterises every page (one page gives a PNG, several a ZIP)."
+        "description": "`compress` re-encodes an image at `quality` or re-distils a PDF with Ghostscript; `image_to_pdf` wraps one image in a page; `pdf_to_image` rasterises every page (one page gives a PNG, several a ZIP). A compress run never returns more bytes than it was given: if the encode would grow the input, the original bytes come back with their own media type and `saved_bytes` is 0."
       },
       "Error": {
         "type": "object",

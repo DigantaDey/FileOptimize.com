@@ -51,6 +51,38 @@ fn gradient(w: u32, h: u32) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
     ImageBuffer::from_fn(w, h, |x, y| Rgb([(x * 9) as u8, (y * 13) as u8, 128]))
 }
 
+/// Textured, so PNG has to spend real bytes on it while JPEG gets to throw them away:
+/// the only honest way to assert that compression shrank something, or that it scales
+/// with quality. At thumbnail sizes the format tables alone outweigh the pixels.
+fn photo(w: u32, h: u32) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
+    ImageBuffer::from_fn(w, h, |x, y| {
+        let n = (x as u64).wrapping_mul(73856093) ^ (y as u64).wrapping_mul(19349663);
+        Rgb([
+            (n % 251) as u8,
+            ((n / 7) % 249) as u8,
+            ((n / 13) % 245) as u8,
+        ])
+    })
+}
+
+fn photo_png(w: u32, h: u32) -> Vec<u8> {
+    let img = photo(w, h);
+    let mut out = Vec::new();
+    PngEncoder::new(&mut out)
+        .write_image(img.as_raw(), w, h, ExtendedColorType::Rgb8)
+        .unwrap();
+    out
+}
+
+fn photo_jpeg(w: u32, h: u32, quality: u8) -> Vec<u8> {
+    let img = photo(w, h);
+    let mut out = Vec::new();
+    JpegEncoder::new_with_quality(&mut out, quality)
+        .write_image(img.as_raw(), w, h, ExtendedColorType::Rgb8)
+        .unwrap();
+    out
+}
+
 fn png_bytes(w: u32, h: u32) -> Vec<u8> {
     let img = gradient(w, h);
     let mut out = Vec::new();
@@ -91,7 +123,7 @@ fn entries(root: &std::path::Path) -> usize {
 #[tokio::test]
 async fn compresses_png_bytes_into_a_smaller_jpeg() {
     let (engine, root) = setup();
-    let original = png_bytes(24, 16);
+    let original = photo_png(320, 240);
     let outcome = engine
         .run(
             Job::new(
@@ -132,21 +164,29 @@ async fn quality_is_respected_and_the_default_applies_when_omitted() {
 
     // JPEG in, JPEG out: size must follow quality monotonically.
     let small = engine
-        .run(Job::new(Action::Compress, "a.jpg", Input::Bytes(jpeg_bytes())).with_quality(5))
+        .run(Job::new(
+            Action::Compress,
+            "a.jpg",
+            Input::Bytes(photo_jpeg(320, 240, 92)),
+        ))
         .await
         .expect("low quality");
     let omitted = engine
         .run(Job::new(
             Action::Compress,
             "a.jpg",
-            Input::Bytes(jpeg_bytes()),
+            Input::Bytes(photo_jpeg(320, 240, 92)),
         ))
         .await
         .expect("default quality");
     cfg.compression_default_quality = 95;
     let big_engine = Engine::new(cfg);
     let big = big_engine
-        .run(Job::new(Action::Compress, "a.jpg", Input::Bytes(jpeg_bytes())).with_quality(95))
+        .run(Job::new(
+            Action::Compress,
+            "a.jpg",
+            Input::Bytes(photo_jpeg(320, 240, 92)),
+        ))
         .await
         .expect("high quality");
 
@@ -182,6 +222,30 @@ async fn wraps_an_image_in_a_pdf_the_caller_can_read_back() {
     assert_eq!(outcome.output.filename, "scan.pdf");
     assert_eq!(outcome.output.content_type, "application/pdf");
     assert_eq!(entries(&root), 0);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn an_image_that_cannot_be_made_smaller_comes_back_as_it_was() {
+    // A 24x16 gradient PNG is 218 bytes. The smallest honest JPEG of the same pixels costs
+    // several times that because the format's tables do not amortise over six blocks, so a
+    // naive compressor would "optimise" the file into something bigger than it started as.
+    let (engine, root) = setup();
+    let original = png_bytes(24, 16);
+    let outcome = engine
+        .run(
+            Job::new(Action::Compress, "dot.png", Input::Bytes(original.clone()))
+                .with_quality(25),
+        )
+        .await
+        .expect("compress");
+
+    assert_eq!(outcome.output.content_type, "image/png");
+    assert_eq!(outcome.output.filename, "dot_optimized.png");
+    assert_eq!(outcome.output.size(), original.len() as u64);
+    assert_eq!(outcome.bytes_saved(), 0, "the engine claimed a saving");
+    assert_eq!(outcome.output.read_all().expect("payload"), original);
+    assert_eq!(entries(&root), 0, "scratch left behind");
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -385,7 +449,7 @@ async fn a_retained_result_can_be_read_back_and_dropped() {
             Job::new(
                 Action::Compress,
                 "keep.png",
-                Input::Bytes(png_bytes(24, 16)),
+                Input::Bytes(photo_png(320, 240)),
             )
             .with_quality(45)
             .stored(),

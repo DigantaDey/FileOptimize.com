@@ -85,7 +85,19 @@ jobs:
         run: brew install ghostscript poppler
       - uses: Swatinem/rust-cache@v2
       - name: Run tests
-        run: cargo test -- --nocapture 2>&1 | tee /tmp/test.log; exit "${PIPESTATUS[0]}"
+        run: cargo test --no-fail-fast -- --nocapture 2>&1 | tee /tmp/test.log; exit "${PIPESTATUS[0]}"
+      - name: Failure digest
+        # Comment bodies are truncated to their tail, so re-state every target's failures
+        # at the very end of the log instead of hunting them through 40k lines.
+        if: failure()
+        run: |
+          {
+            echo
+            echo "===== FAILURE DIGEST (all targets) ====="
+            grep -nE "^(error|test .* FAILED|thread .* panicked at|---- .* output ----|Doc-tests|error\[E[0-9]+\])" /tmp/test.log | tail -60
+            echo "----- panics with context -----"
+            grep -A3 "panicked at" /tmp/test.log | tail -60
+          } | tee -a /tmp/test.log
       - uses: ./.github/actions/report-failure
         if: failure()
         with:

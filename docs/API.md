@@ -122,6 +122,12 @@ Download names follow the action: `photo.jpg` → `photo_optimized.jpg` (image c
 `report.pdf` → `report_compressed.pdf` (PDF compress), `scan.png` → `scan.pdf`
 (image→PDF), `doc.pdf` → `doc.png` or `doc_images.zip` (PDF→image, entries `page_0001.png`).
 
+`compress` never hands back more bytes than you sent. A file that is already smaller than any
+encode of it — a 24×16 PNG costs fewer bits than the ~700-byte JPEG of the same pixels — comes
+back as its own pixels with its own media type, so `X-Output-Size` equals `X-Original-Size`
+(and `saved_bytes: 0` in a retained descriptor). Read the returned `Content-Type` and
+`Content-Disposition` rather than assuming `_optimized.jpg`.
+
 ### JavaScript
 
 ```js

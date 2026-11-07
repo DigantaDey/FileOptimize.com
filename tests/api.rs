@@ -138,6 +138,25 @@ fn gradient() -> ImageBuffer<Rgb<u8>, Vec<u8>> {
     ImageBuffer::from_fn(24, 16, |x, y| Rgb([(x * 9) as u8, (y * 13) as u8, 128]))
 }
 
+/// A bigger, *textured* image: PNG has to spend bits on the entropy, JPEG gets to throw
+/// them away. Anything that asserts "the output is a smaller JPEG" needs this, because a
+/// 24x16 gradient cannot be made smaller by any encoder.
+fn photo_png() -> Vec<u8> {
+    let img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::from_fn(320, 240, |x, y| {
+        let n = (x as u64).wrapping_mul(73856093) ^ (y as u64).wrapping_mul(19349663);
+        Rgb([
+            (n % 251) as u8,
+            ((n / 7) % 249) as u8,
+            ((n / 13) % 245) as u8,
+        ])
+    });
+    let mut out = Vec::new();
+    PngEncoder::new(&mut out)
+        .write_image(img.as_raw(), 320, 240, ExtendedColorType::Rgb8)
+        .unwrap();
+    out
+}
+
 fn png() -> Vec<u8> {
     let img = gradient();
     let mut out = Vec::new();
@@ -488,7 +507,7 @@ async fn rewrites_a_traversal_filename_in_the_download_header() {
     let body = multipart(&[
         ("action", None, b"compress"),
         ("quality", None, b"50"),
-        ("file", Some("../../secret dir/photo.png"), &png()),
+        ("file", Some("../../secret dir/photo.png"), &photo_png()),
     ]);
     let (status, headers, out) = send(&app, post_process(body)).await;
     assert_eq!(status, StatusCode::OK, "{}", err_of(&out));
@@ -506,7 +525,7 @@ async fn rewrites_a_traversal_filename_in_the_download_header() {
 #[tokio::test]
 async fn compresses_a_png_to_jpeg_and_reports_sizes() {
     let (app, root) = build_app(test_config(4 * 1024 * 1024, 1_000_000));
-    let original = png();
+    let original = photo_png();
     let body = multipart(&[
         ("action", None, b"compress"),
         ("quality", None, b"35"),
@@ -533,7 +552,13 @@ async fn compresses_a_png_to_jpeg_and_reports_sizes() {
 
     // The result decodes and keeps its geometry.
     let img = image::load_from_memory(&out).expect("output decodes");
-    assert_eq!((img.width(), img.height()), (24, 16));
+    assert_eq!((img.width(), img.height()), (320, 240));
+    assert!(
+        (out.len() as u64) < original.len() as u64,
+        "compress handed back a bigger file: {} -> {}",
+        original.len(),
+        out.len()
+    );
 
     // In-memory results free their working directory immediately.
     assert_eq!(
@@ -763,7 +788,7 @@ async fn poppler_rasterises_the_pdfs_we_generate() {
         .stdin(Stdio::null())
         .output()
         .expect("pdftoppm runnable");
-    let pages: Vec<PathBuf> = std::fs::read_dir(&dir)
+    let mut pages: Vec<PathBuf> = std::fs::read_dir(&dir)
         .map(|rd| {
             rd.flatten()
                 .map(|e| e.path())
@@ -771,6 +796,11 @@ async fn poppler_rasterises_the_pdfs_we_generate() {
                 .collect()
         })
         .unwrap_or_default();
+    pages.sort();
+    // The scratch dir goes before the assertions, so the bytes have to be lifted out
+    // first — otherwise a passing run leaves nothing to read and the failure message
+    // is "No such file or directory" instead of whatever poppler actually produced.
+    let rendered: Option<Vec<u8>> = pages.first().and_then(|p| std::fs::read(p).ok());
     let _ = std::fs::remove_dir_all(&dir);
 
     assert!(
@@ -779,7 +809,8 @@ async fn poppler_rasterises_the_pdfs_we_generate() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert_eq!(pages.len(), 1, "expected exactly one rendered page");
-    let img = image::open(&pages[0]).expect("rendered page is not a decodable PNG");
+    let page = rendered.expect("pdftoppm wrote a page file");
+    let img = image::load_from_memory(&page).expect("rendered page is not a decodable PNG");
     assert!(
         img.width() >= 32 && img.height() >= 24,
         "unexpected raster size {}x{}",
@@ -902,7 +933,7 @@ async fn concurrent_jobs_are_gated_but_all_complete() {
 #[tokio::test]
 async fn v1_returns_a_descriptor_and_a_refetchable_result() {
     let (app, root) = build_app(test_config(4 * 1024 * 1024, 1_000_000));
-    let original = png();
+    let original = photo_png();
     let body = multipart(&[
         ("action", None, b"compress"),
         ("quality", None, b"50"),

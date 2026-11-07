@@ -190,6 +190,8 @@ Input validation:
 - **`compress` (image)** — decode, then re-encode. JPEG stays JPEG at the requested quality; PNG
   stays PNG only at `quality ≥ 90` (PNG has no quality knob, so anything lower is strictly better as
   JPEG); WebP/GIF/BMP/TIFF are normalised to JPEG. Alpha is flattened, matching the old behaviour.
+  An encode that would end up bigger than the input is thrown away and the original bytes are returned
+  instead, so `X-Output-Size` never exceeds `X-Original-Size` — already-optimal files cost nothing.
 - **`compress` (PDF)** — ghostscript `pdfwrite` with the same `/PDFSETTINGS` mapping the original
   used (`≤25` screen, `≤50` ebook, `≤75` printer, else prepress) plus `-dSAFER`, so text stays text
   and the file is re-compressed on the fly rather than rasterised.

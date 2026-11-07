@@ -637,15 +637,29 @@ impl Engine {
                 let max_pixels = self.config.max_image_pixels;
                 // Codecs are CPU-bound: run them on the blocking pool so the async
                 // runtime keeps accepting and streaming other requests.
-                let (bytes, target) = tokio::task::spawn_blocking(move || {
+                // The input bytes ride along with the encode and come back out of the
+                // closure, so the "did this actually help?" check costs no extra copy.
+                let (bytes, target, original) = tokio::task::spawn_blocking(move || {
                     let img = decode_checked(&data, fmt, max_pixels)?;
                     let target = pick_compress_format(fmt, quality);
-                    Ok::<_, AppError>((encode_image(img, target, quality)?, target))
+                    let bytes = encode_image(img, target, quality)?;
+                    Ok::<_, AppError>((bytes, target, data))
                 })
                 .await
                 .map_err(join_err)??;
 
                 let base = base_name(original_name);
+                // A 24x16 PNG is 218 bytes; the same pixels as a JPEG cost ~700, because
+                // the format's tables do not amortise over a handful of blocks. Returning
+                // that would be a regression dressed up as a result, so if the encode did
+                // not win, the caller gets their own bytes back and `saved_bytes` is 0.
+                if bytes.len() as u64 >= original.len() as u64 {
+                    return Ok(Output::in_memory(
+                        original,
+                        format!("{base}_optimized.{}", ext_of(fmt)),
+                        content_type_of(fmt),
+                    ));
+                }
                 Ok(Output::in_memory(
                     bytes,
                     format!("{base}_optimized.{}", ext_of(target)),
