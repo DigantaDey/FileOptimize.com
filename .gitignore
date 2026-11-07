@@ -1,0 +1,17 @@
+# Rust
+/target
+**/*.rs.bk
+*.swp
+
+# Temp / runtime
+/tmp
+/run
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode
+.idea

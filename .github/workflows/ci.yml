@@ -1,0 +1,303 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+  DEBIAN_FRONTEND: noninteractive
+
+jobs:
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Check formatting
+        run: cargo fmt --all -- --check | tee /tmp/fmt.log; exit "${PIPESTATUS[0]}"
+      - uses: ./.github/actions/report-failure
+        if: failure()
+        with:
+          title: cargo fmt --check
+          log: /tmp/fmt.log
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Install PDF tooling
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ghostscript poppler-utils
+      - uses: Swatinem/rust-cache@v2
+      - name: Lint
+        run: cargo clippy --all-targets -- -D warnings 2>&1 | tee /tmp/clippy.log; exit "${PIPESTATUS[0]}"
+      - uses: ./.github/actions/report-failure
+        if: failure()
+        with:
+          title: cargo clippy -D warnings
+          log: /tmp/clippy.log
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      pull-requests: write
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install PDF tooling (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ghostscript poppler-utils
+      - name: Install PDF tooling (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ghostscript poppler
+      - uses: Swatinem/rust-cache@v2
+      - name: Run tests
+        run: cargo test --no-fail-fast -- --nocapture 2>&1 | tee /tmp/test.log; exit "${PIPESTATUS[0]}"
+      - name: Failure digest
+        # Comment bodies are truncated to their tail, so re-state every target's failures
+        # at the very end of the log instead of hunting them through 40k lines.
+        if: failure()
+        run: |
+          {
+            echo
+            echo "===== FAILURE DIGEST (all targets) ====="
+            grep -nE "^(error|test .* FAILED|thread .* panicked at|---- .* output ----|Doc-tests|error\[E[0-9]+\])" /tmp/test.log | tail -60
+            echo "----- panics with context -----"
+            grep -A3 "panicked at" /tmp/test.log | tail -60
+          } | tee -a /tmp/test.log
+      - uses: ./.github/actions/report-failure
+        if: failure()
+        with:
+          title: cargo test (${{ matrix.os }})
+          log: /tmp/test.log
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  build:
+    name: Release build
+    needs: [fmt, clippy, test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release
+      - name: Build
+        run: cargo build --release --bin fileoptimize 2>&1 | tee /tmp/build.log; exit "${PIPESTATUS[0]}"
+      - name: Binary size
+        run: |
+          ls -lh target/release/fileoptimize
+          du -h target/release/fileoptimize | awk '{print "release binary size: " $1}'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fileoptimize-linux-x86_64
+          path: target/release/fileoptimize
+          retention-days: 14
+      - uses: ./.github/actions/report-failure
+        if: failure()
+        with:
+          title: cargo build --release
+          log: /tmp/build.log
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  smoke:
+    name: Smoke test (release binary)
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      # The report-failure action lives in the repo, so it has to be checked out.
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: fileoptimize-linux-x86_64
+          path: bin
+      - name: Install PDF tooling
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ghostscript poppler-utils
+      - run: chmod +x bin/fileoptimize
+      - name: Boot and exercise
+        env:
+          PORT: "8099"
+          TMP_DIR: ${{ github.workspace }}/tmp-smoke
+          RUST_LOG: info
+        run: |
+          set -euo pipefail
+          trap 'echo "SMOKE FAILED at script line $LINENO"' ERR
+          smoke() {
+            # xtrace so the transcript ends with the exact command that failed.
+            set -x
+              # One helper so a regression names itself instead of printing a code.
+            expect() {
+              want=$1; label=$2; shift 2
+              got=$(curl -s -o /dev/null -w '%{http_code}' "$@")
+              if [ "$got" != "$want" ]; then
+                echo "$label: expected $want, got $got"
+                exit 1
+              fi
+              echo "$label: $got ok"
+            }
+            ./bin/fileoptimize > /tmp/server.log 2>&1 &
+            pid=$!
+            for i in $(seq 1 30); do
+              curl -fsS http://127.0.0.1:8099/api/health >/dev/null 2>&1 && break
+              sleep 1
+            done
+            echo "--- health"; curl -fsS http://127.0.0.1:8099/api/health; echo
+            echo "--- info";   curl -fsS http://127.0.0.1:8099/api/info; echo
+            echo "--- ui";      curl -fsS -o /tmp/ui.html http://127.0.0.1:8099/
+                                grep -q "<!DOCTYPE html>" /tmp/ui.html && echo "page served"
+            echo "--- assets";  curl -fsS -o /tmp/style.css http://127.0.0.1:8099/assets/style.css
+                                head -c 40 /tmp/style.css; echo
+                                grep -q ":" /tmp/style.css && echo "asset served"
+            echo "--- 404";     curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8099/nope
+            echo "--- 400 (json body)"; curl -s -o /dev/null -w '%{http_code}\n' -X POST -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:8099/api/process
+            echo "--- 400";     curl -s -X POST -F 'action=nope' http://127.0.0.1:8099/api/process; echo
+            echo "--- 400b";    curl -s -X POST -F 'action=compress' -F 'quality=101' -F 'file=@/etc/hostname;type=image/png' http://127.0.0.1:8099/api/process; echo
+            echo "--- not-multipart"; curl -s -o /dev/null -w '%{http_code}\n' -X POST -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:8099/api/process
+
+            # ---- the versioned, machine-facing API on the real binary
+            echo "--- openapi spec"
+            curl -fsS http://127.0.0.1:8099/api/openapi.json | python3 -c \
+              'import json,sys; d=json.load(sys.stdin); missing=[r for r in ("/api/v1/process","/api/v1/results/{id}","/api/v1/info") if r not in d["paths"]]; assert not missing, missing; print("spec ok:", len(d["paths"]), "paths")'
+            echo "--- v1 info"
+            curl -fsS http://127.0.0.1:8099/api/v1/info | python3 -c \
+              'import json,sys; d=json.load(sys.stdin); assert d["quality_range"]==[1,100]; assert d["memory_budget_mb"]>0; assert "compress" in d["actions"]; print("info ok:", d["tools"], "budget", d["memory_budget_mb"], "MB")'
+
+            echo "--- v1 store round trip"
+            python3 -c '
+            import struct, zlib
+            w = h = 240
+            # Textured, not smooth: PNG has to spend real bits on it, so a quality-35 JPEG
+            # is guaranteed to win and the magic-byte check below means something.
+            def px(x, y):
+                n = (x * 73856093) ^ (y * 19349663)
+                return bytes((n % 251, (n // 7) % 249, (n // 13) % 245))
+            rows = b"".join(b"\x00" + b"".join(px(x, y) for x in range(w)) for y in range(h))
+            def chunk(t, d):
+                return struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d) & 0xFFFFFFFF)
+            png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(rows, 6)) + chunk(b"IEND", b"")
+            open("/tmp/px.png", "wb").write(png)
+            print("made a", len(png), "byte png")
+            '
+            curl -fsS -X POST -F "file=@/tmp/px.png" -F "action=compress" -F "quality=35" -F "store=1" \
+              http://127.0.0.1:8099/api/v1/process > /tmp/desc.json
+            cat /tmp/desc.json; echo
+            path=$(python3 -c 'import json;print(json.load(open("/tmp/desc.json"))["download_path"])')
+            size=$(python3 -c 'import json;print(json.load(open("/tmp/desc.json"))["output_size"])')
+            echo "--- refetch $path"
+            curl -fsS -o /tmp/again.jpg "http://127.0.0.1:8099$path"
+            test "$(stat -c%s /tmp/again.jpg)" = "$size" || { echo "size mismatch on refetch"; exit 1; }
+            head -c 2 /tmp/again.jpg | od -An -tx1 | grep -q 'ff d8' || { echo "not a jpeg"; exit 1; }
+            echo "--- discard"
+            curl -fsS -o /dev/null -w '%{http_code}\n' -X DELETE "http://127.0.0.1:8099$path"
+            curl -s -o /dev/null -w 'gone: %{http_code}\n' "http://127.0.0.1:8099$path"
+            echo "--- a bogus id is refused"
+            curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8099/api/v1/results/../../etc/passwd
+            echo "--- legacy alias still returns the file"
+            curl -fsS -D /tmp/h.txt -o /tmp/legacy.jpg -X POST -F "file=@/tmp/px.png" -F "action=compress" \
+              http://127.0.0.1:8099/upload
+            grep -qi '^x-output-size:' /tmp/h.txt || { echo "missing x-output-size"; exit 1; }
+            grep -qi '^content-disposition: attachment' /tmp/h.txt || { echo "missing disposition"; exit 1; }
+
+            echo "--- a bogus result id is refused before any disk access"
+            expect 400 "malformed id refused" "http://127.0.0.1:8099/api/v1/results/not-an-id"
+
+            echo "--- a key-protected instance"
+            API_KEYS=smoke-secret-1 PORT=8098 ./bin/fileoptimize > /tmp/server-auth.log 2>&1 &
+            apid=$!
+            for i in $(seq 1 30); do
+              curl -fsS http://127.0.0.1:8098/api/v1/health >/dev/null 2>&1 && break
+              sleep 1
+            done
+            expect 401 "no key"    -X POST -F "file=@/tmp/px.png" http://127.0.0.1:8098/api/v1/process
+            expect 401 "bad key"   -X POST -H 'x-api-key: nope' -F "file=@/tmp/px.png" http://127.0.0.1:8098/api/v1/process
+            expect 200 "good key"  -X POST -H 'x-api-key: smoke-secret-1' -F "file=@/tmp/px.png" http://127.0.0.1:8098/api/v1/process
+            expect 200 "bearer"    -X POST -H 'Authorization: Bearer smoke-secret-1' -F "file=@/tmp/px.png" http://127.0.0.1:8098/api/v1/process
+            expect 200 "query key" -X POST -F "file=@/tmp/px.png" "http://127.0.0.1:8098/api/v1/process?api_key=smoke-secret-1"
+            expect 200 "info open" http://127.0.0.1:8098/api/v1/info
+            expect 401 "results need a key too" http://127.0.0.1:8098/api/v1/results/00000000000000000000000000000000
+            expect 404 "unknown id after auth" -H 'x-api-key: smoke-secret-1' \
+              http://127.0.0.1:8098/api/v1/results/00000000000000000000000000000000
+            kill $apid
+            kill $pid
+            echo "--- server log"; cat /tmp/server.log
+          }
+          # The step log never reaches the PR, so the transcript (and the trap line above)
+          # naming the command that tripped) goes into the file the reporter reads.
+          smoke 2>&1 | tee -a /tmp/smoke.log
+      - name: Keep the server log
+        if: always()
+        run: test -s /tmp/smoke.log || { cp /tmp/server.log /tmp/smoke.log 2>/dev/null || touch /tmp/smoke.log; }
+      - uses: ./.github/actions/report-failure
+        if: failure()
+        with:
+          title: release binary smoke test
+          log: /tmp/smoke.log
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  docker:
+    name: Docker image
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: fileoptimize:ci
+      - name: Container smoke test
+        run: |
+          set -euo pipefail
+          docker run -d --name fo -p 8123:8080 fileoptimize:ci
+          for i in $(seq 1 40); do
+            curl -fsS http://127.0.0.1:8123/api/health >/dev/null 2>&1 && break
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8123/api/health; echo
+          curl -fsS http://127.0.0.1:8123/api/info | grep -q ghostscript && echo "tool probe ok"
+          docker rm -f fo
