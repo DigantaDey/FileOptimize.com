@@ -1,18 +1,44 @@
-//! FileOptimize — a fast, memory-efficient file compression & conversion backend.
+//! FileOptimize — a fast, memory-efficient file compression & conversion engine, with
+//! an HTTP service on top of it.
 //!
-//! Architecture:
-//! - [`routes`] — HTTP surface (`/`, `/api/process`, `/api/health`, `/api/info`).
-//! - [`processing`] — the transformation pipeline (images, PDFs, archives).
+//! # Two layers, one set of rules
+//!
+//! - [`engine`] — **the product.** [`engine::Engine`] turns bytes into bytes: validation,
+//!   limits, concurrency and memory accounting, scratch-space lifecycle, retained
+//!   results. It knows nothing about HTTP. Embed it in another Rust service (a queue
+//!   worker, a CLI, a batch importer) and you get exactly the guarantees the public API
+//!   advertises, because the API is a thin adapter in front of it.
+//! - [`routes`] — the transport: multipart parsing, headers, status codes, API keys,
+//!   `/api/v1/*` for machines and `/api/process` + `/upload` for the bundled UI and
+//!   legacy clients.
+//! - [`processing`] — the codecs and tool invocations the engine drives (images, PDFs,
+//!   archives).
 //! - [`state`] / [`config`] — shared handles and tunable limits.
-//! - [`cleanup`] — TTL sweeper for temporary artifacts.
+//! - [`cleanup`] — TTL sweeper for temporary and retained artifacts.
 //! - [`detect`] / [`sanitize`] — input validation primitives.
 //!
-//! [`create_app`] builds the configured [`axum::Router`]; `src/main.rs` binds it to a
-//! listener with graceful shutdown.
+//! # Embedding
+//!
+//! ```no_run
+//! use fileoptimize::engine::{Action, Engine, Input, Job};
+//!
+//! # async fn demo() -> Result<(), fileoptimize::error::AppError> {
+//! let engine = Engine::from_env();
+//! let job = Job::new(Action::ImageToPdf, "scan.png", Input::Bytes(vec![]));
+//! let outcome = engine.run(job).await?;
+//! let pdf = outcome.output.read_all()?;
+//! assert!(pdf.starts_with(b"%PDF-"));
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! [`create_app`] builds the configured [`axum::Router`] from an [`state::AppState`];
+//! `src/main.rs` binds it to a listener with graceful shutdown.
 
 pub mod cleanup;
 pub mod config;
 pub mod detect;
+pub mod engine;
 pub mod error;
 pub mod processing;
 pub mod routes;

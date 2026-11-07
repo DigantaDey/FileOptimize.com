@@ -44,6 +44,10 @@ fn test_config(max_upload: u64, max_pixels: u32) -> Config {
         compression_default_quality: 60,
         pdf_raster_dpi: 96,
         tool_timeout_secs: 60,
+        // Generous, so only the dedicated memory test ever feels it.
+        memory_budget_mb: 512,
+        // Open by default: the auth tests set this explicitly.
+        api_keys: Vec::new(),
     }
 }
 
@@ -73,6 +77,22 @@ fn multipart(fields: &[(&str, Option<&str>, &[u8])]) -> Vec<u8> {
     }
     body.extend_from_slice(format!("--{BOUNDARY}--\r\n").as_bytes());
     body
+}
+
+/// Request to an arbitrary path with optional extra headers — the v1 tests need to
+/// target `/api/v1/*` and to attach API keys.
+fn request(method: &str, path: &str, body: Vec<u8>, extra: &[(&str, &str)]) -> Request<Body> {
+    let mut builder = Request::builder().method(method).uri(path);
+    if method == "POST" {
+        builder = builder.header(
+            header::CONTENT_TYPE,
+            HeaderValue::from_str(&format!("multipart/form-data; boundary={BOUNDARY}")).unwrap(),
+        );
+    }
+    for (name, value) in extra {
+        builder = builder.header(*name, HeaderValue::from_str(value).unwrap());
+    }
+    builder.body(Body::from(body)).unwrap()
 }
 
 fn post_process(body: Vec<u8>) -> Request<Body> {
@@ -737,7 +757,7 @@ async fn poppler_rasterises_the_pdfs_we_generate() {
     std::fs::write(&pdf_path, valid_pdf()).expect("write pdf");
 
     let out = StdCommand::new("pdftoppm")
-        .args(["-png", "-r150"])
+        .args(["-png", "-r", "150"])
         .arg(&pdf_path)
         .arg(dir.join("page"))
         .stdin(Stdio::null())
@@ -874,5 +894,246 @@ async fn concurrent_jobs_are_gated_but_all_complete() {
         assert!(len > 100, "suspiciously small output: {len}");
     }
     assert_eq!(leftovers(&root), 0, "temp dirs leaked under concurrency");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+// --------------------------------------------------------- versioned API for programs
+
+#[tokio::test]
+async fn v1_returns_a_descriptor_and_a_refetchable_result() {
+    let (app, root) = build_app(test_config(4 * 1024 * 1024, 1_000_000));
+    let original = png();
+    let body = multipart(&[
+        ("action", None, b"compress"),
+        ("quality", None, b"50"),
+        // `store` is how a client that cannot stream a download uses the service.
+        ("store", None, b"1"),
+        ("file", Some("keep.png"), &original),
+    ]);
+    let (status, headers, out) = send(&app, request("POST", "/api/v1/process", body, &[])).await;
+    assert_eq!(status, StatusCode::OK, "{}", err_of(&out));
+    assert_eq!(hdr(&headers, header::CONTENT_TYPE), "application/json");
+
+    let v: serde_json::Value = serde_json::from_slice(&out).expect("descriptor json");
+    let id = v["id"].as_str().expect("id").to_string();
+    assert_eq!(id.len(), 32, "unexpected id: {id}");
+    assert_eq!(v["filename"].as_str(), Some("keep_optimized.jpg"));
+    assert_eq!(v["action"].as_str(), Some("compress"));
+    assert_eq!(v["quality"].as_u64(), Some(50));
+    assert_eq!(v["original_size"].as_u64(), Some(original.len() as u64));
+    assert!(v["saved_bytes"].as_u64().unwrap_or(0) > 0, "{v}");
+    let path = v["download_path"].as_str().expect("download_path").to_string();
+    assert_eq!(path, format!("/api/v1/results/{id}"));
+
+    // Fetch it back: same bytes as the direct download would have produced.
+    let (status, headers, again) = send(&app, request("GET", &path, Vec::new(), &[])).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(hdr(&headers, header::CONTENT_TYPE), "image/jpeg");
+    assert_eq!(
+        hdr(&headers, header::CONTENT_DISPOSITION),
+        "attachment; filename=\"keep_optimized.jpg\""
+    );
+    assert_eq!(again.len() as u64, v["output_size"].as_u64().expect("output_size"));
+    assert_eq!(&again[0..2], &[0xFF, 0xD8]);
+
+    // Discard it early, then it is gone for good.
+    let (status, _, _) = send(&app, request("DELETE", &path, Vec::new(), &[])).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _, out) = send(&app, request("GET", &path, Vec::new(), &[])).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let code: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(code["code"].as_str(), Some("not_found"));
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn an_id_that_is_not_32_hex_chars_is_refused_without_touching_disk() {
+    let (app, root) = build_app(test_config(4 * 1024 * 1024, 1_000_000));
+    for bad in [
+        "../../etc/passwd",
+        "",
+        "deadbeef",
+        "DEADBEEFDEADBEEFDEADBEEFDEADBEEF",
+        "deadbeefdeadbeefdeadbeefdeadbeef/",
+    ] {
+        let (status, _, out) = send(
+            &app,
+            request("GET", &format!("/api/v1/results/{bad}"), Vec::new(), &[]),
+        )
+        .await;
+        assert!(
+            matches!(status, StatusCode::BAD_REQUEST | StatusCode::NOT_FOUND),
+            "{bad}: {status} — {}",
+            err_of(&out)
+        );
+    }
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn v1_demands_a_key_only_when_the_operator_configured_one() {
+    let mut cfg = test_config(4 * 1024 * 1024, 1_000_000);
+    cfg.api_keys = vec!["s3cret".to_string(), "other-key".to_string()];
+    let (app, root) = build_app(cfg);
+
+    let body = || {
+        multipart(&[
+            ("action", None, b"compress"),
+            ("file", Some("a.png"), &png()),
+        ])
+    };
+
+    // No key at all → 401, with a challenge and a machine-readable code.
+    let (status, headers, out) = send(&app, request("POST", "/api/v1/process", body(), &[])).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{}", err_of(&out));
+    assert!(
+        hdr(&headers, header::WWW_AUTHENTICATE).contains("Bearer"),
+        "no challenge header"
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(v["code"].as_str(), Some("unauthorized"));
+
+    // Wrong key → still 401 (and a different message, so clients can tell the two apart).
+    let (status, _, _) = send(
+        &app,
+        request("POST", "/api/v1/process", body(), &[("x-api-key", "nope")]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // Either accepted spelling of the key works, and so does the query fallback.
+    for (name, value) in [
+        ("x-api-key", "s3cret"),
+        ("x-api-key", "other-key"),
+        ("authorization", "Bearer s3cret"),
+        ("authorization", "bearer other-key"),
+    ] {
+        let (status, _, out) = send(
+            &app,
+            request("POST", "/api/v1/process", body(), &[(name, value)]),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{name}: {}", err_of(&out));
+    }
+    let (status, _, out) = send(
+        &app,
+        request(
+            "POST",
+            "/api/v1/process?api_key=s3cret",
+            body(),
+            &[],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", err_of(&out));
+
+    // Probes and the legacy surface stay open, which is the whole point of splitting
+    // them: a load balancer must not need a secret.
+    let (status, _, _) = send(&app, request("GET", "/api/v1/health", Vec::new(), &[])).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, _) = send(&app, request("GET", "/api/v1/info", Vec::new(), &[])).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, _) = send(&app, post_process(body())).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn info_advertises_the_new_engine_limits() {
+    let (app, root) = build_app(test_config(1234 * 1024, 5_000_000));
+    let (status, _, out) = send(&app, request("GET", "/api/v1/info", Vec::new(), &[])).await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(v["max_upload_size"].as_u64(), Some(1234 * 1024));
+    assert_eq!(v["max_image_pixels"].as_u64(), Some(5_000_000));
+    assert_eq!(v["memory_budget_mb"].as_u64(), Some(512));
+    assert_eq!(v["memory_available_mb"].as_u64(), Some(512));
+    assert_eq!(v["result_ttl_secs"].as_u64(), Some(3_600));
+    assert_eq!(v["auth_required"].as_bool(), Some(false));
+    assert_eq!(v["quality_range"][0].as_u64(), Some(1));
+    assert_eq!(v["quality_range"][1].as_u64(), Some(100));
+    let actions: Vec<&str> = v["actions"]
+        .as_array()
+        .expect("actions")
+        .iter()
+        .map(|a| a.as_str().expect("action str"))
+        .collect();
+    assert_eq!(actions, ["compress", "image_to_pdf", "pdf_to_image"]);
+    assert!(v["tools"].get("ghostscript").is_some(), "{v}");
+
+    // Health reports queue depth, which is what an autoscaler wants to see.
+    let (status, _, out) = send(&app, request("GET", "/api/health", Vec::new(), &[])).await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(v["status"].as_str(), Some("ok"));
+    assert_eq!(v["running_jobs"].as_u64(), Some(0));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn the_shipped_openapi_document_describes_the_real_routes() {
+    let (app, root) = build_app(test_config(4 * 1024 * 1024, 1_000_000));
+    for path in ["/api/openapi.json", "/api/v1/openapi.json"] {
+        let (status, headers, out) = send(&app, request("GET", path, Vec::new(), &[])).await;
+        assert_eq!(status, StatusCode::OK, "{path}");
+        assert!(hdr(&headers, header::CONTENT_TYPE).starts_with("application/json"));
+        let v: serde_json::Value = serde_json::from_slice(&out).expect("valid json");
+        assert_eq!(v["openapi"].as_str().unwrap().chars().next().unwrap(), '3');
+        for route in [
+            "/api/v1/process",
+            "/api/v1/results/{id}",
+            "/api/v1/info",
+            "/api/process",
+            "/upload",
+        ] {
+            assert!(v["paths"].get(route).is_some(), "missing {route} in {path}");
+        }
+        let codes = v["components"]["schemas"]["Error"]["properties"]["code"]["enum"]
+            .as_array()
+            .expect("error codes");
+        for code in ["bad_request", "payload_too_large", "unauthorized"] {
+            assert!(
+                codes.iter().any(|c| c.as_str() == Some(code)),
+                "missing error code {code}"
+            );
+        }
+    }
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn error_bodies_carry_a_stable_code() {
+    let (app, root) = build_app(test_config(4 * 1024 * 1024, 1_000_000));
+    let cases: Vec<(&str, Vec<u8>)> = vec![
+        (
+            "bad_request",
+            multipart(&[
+                ("action", None, b"shrink"),
+                ("file", Some("a.png"), &png()),
+            ]),
+        ),
+        (
+            "unsupported_media_type",
+            multipart(&[
+                ("action", None, b"compress"),
+                ("file", Some("notes.txt"), b"just some text, not a file we handle"),
+            ]),
+        ),
+    ];
+    for (code, body) in cases {
+        let (status, _, out) = send(&app, post_process(body)).await;
+        let v: serde_json::Value = serde_json::from_slice(&out).expect("json error");
+        assert!(status.is_client_error(), "{code}: {status}");
+        assert_eq!(v["code"].as_str(), Some(code), "{v}");
+        assert!(v["error"].as_str().unwrap_or_default().len() > 10, "{v}");
+    }
+
+    // An unknown path is a JSON 404 with the same envelope.
+    let (status, _, out) = send(&app, request("GET", "/nope", Vec::new(), &[])).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(v["code"].as_str(), Some("not_found"));
     let _ = std::fs::remove_dir_all(root);
 }

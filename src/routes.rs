@@ -1,36 +1,37 @@
-//! HTTP route handlers.
+//! HTTP transport in front of [`crate::engine`].
+//!
+//! This module deliberately contains *no* processing policy: every limit, validation
+//! and transform decision lives in the engine, so an HTTP client, a legacy client and
+//! an embedded Rust caller all get identical behaviour. What is here is form parsing,
+//! streaming, headers, status codes and API-key authentication.
+//!
+//! Routes come in two flavours:
+//! - `/`, `/assets/*`, `/api/health`, `/api/info`, `/api/process`, `/upload` — the
+//!   original (Flask-compatible) surface the bundled UI uses;
+//! - `/api/v1/*` — the same engine behind a versioned, machine-oriented contract:
+//!   optional API keys, a JSON descriptor instead of a bare download, results that can
+//!   be fetched again, and a published OpenAPI document.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use axum::{
     body::Body,
-    extract::{DefaultBodyLimit, Multipart, State},
+    extract::{DefaultBodyLimit, Multipart, Path as PathParam, Query, State},
     http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{delete, get, post, MethodRouter},
     Json, Router,
 };
 use serde::Serialize;
 use tokio::io::AsyncWriteExt;
 
-use crate::detect::{detect, jpeg_is_cmyk, FileKind};
+use crate::engine::{Action, Input, Job, JobId, JobOutcome};
 use crate::error::{AppError, AppResult};
-use crate::processing::image::encode_image;
-use crate::processing::pdf::{compress_pdf, gs_available, pdf_to_images, pdftoppm_available};
-use crate::processing::pdf_gen::build_image_pdf;
-use crate::processing::zip::write_zip_from_files;
-use crate::processing::{
-    base_name, check_dimensions, content_type_of, decode_checked, ext_of, parse_quality,
-    pick_compress_format, read_header, Output,
-};
-use crate::sanitize::{extension_of, sanitize_filename};
-use crate::state::{AppState, WorkDir};
+use crate::processing::Output;
+use crate::sanitize::extension_of;
+use crate::state::AppState;
 
-/// DPI assumed when turning image pixels into PDF points (72 pt per inch).
-const IMAGE_PDF_DPI: f64 = 100.0;
-/// Quality used when a non-JPEG image must be re-encoded for embedding in a PDF.
-const IMAGE_PDF_EMBED_QUALITY: u8 = 90;
 /// Read size used when streaming a file off disk into the response body.
 const STREAM_BUF_BYTES: usize = 128 * 1024;
 
@@ -38,22 +39,30 @@ const STREAM_BUF_BYTES: usize = 128 * 1024;
 /// top by [`crate::create_app`].
 pub fn router(state: AppState) -> Router {
     let body_limit = state.config.body_limit();
+    // Every upload route gets the same explicit cap: the file size limit plus room for
+    // the multipart framing and the small form fields riding with it.
+    let limited = |route: MethodRouter<AppState>| route.layer(DefaultBodyLimit::max(body_limit));
+
     Router::new()
         .route("/", get(index))
         .route("/index.html", get(index))
         .route("/assets/style.css", get(style_css))
         .route("/assets/script.js", get(script_js))
+        // Health and info stay open even when the API is key-protected: orchestrators
+        // and load balancers must probe without a secret.
         .route("/api/health", get(health))
         .route("/api/info", get(info))
+        .route("/api/openapi.json", get(openapi))
         // `/upload` is kept as a legacy alias so existing clients keep working.
-        .route(
-            "/upload",
-            post(process).layer(DefaultBodyLimit::max(body_limit)),
-        )
-        .route(
-            "/api/process",
-            post(process).layer(DefaultBodyLimit::max(body_limit)),
-        )
+        .route("/upload", limited(post(process_legacy)))
+        .route("/api/process", limited(post(process_legacy)))
+        // Versioned surface for other applications: identical transforms, plus API-key
+        // authentication and the option to retain the result.
+        .route("/api/v1/health", get(health))
+        .route("/api/v1/info", get(info))
+        .route("/api/v1/openapi.json", get(openapi))
+        .route("/api/v1/process", limited(post(process_v1)))
+        .route("/api/v1/results/:id", get(get_result).delete(delete_result))
         .fallback(not_found)
         .with_state(state)
 }
@@ -63,6 +72,10 @@ pub fn router(state: AppState) -> Router {
 // ---------------------------------------------------------------------------
 
 const STATIC_HTML: &str = include_str!("../web/index.html");
+
+/// The published API contract, embedded at build time from `web/openapi.json` — the
+/// spec and the routes above ship in the same binary, so they cannot drift.
+const OPENAPI_JSON: &str = include_str!("../web/openapi.json");
 
 async fn index() -> impl IntoResponse {
     (
@@ -79,12 +92,19 @@ async fn style_css() -> impl IntoResponse {
 }
 
 async fn script_js() -> impl IntoResponse {
-    (
-        [(
+    [(
+        (
             header::CONTENT_TYPE,
             "application/javascript; charset=utf-8",
-        )],
+        ),
         include_str!("../web/script.js"),
+    )]
+}
+
+async fn openapi() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "application/json; charset=utf-8")],
+        OPENAPI_JSON,
     )
 }
 
@@ -93,47 +113,66 @@ struct Health {
     status: &'static str,
     service: &'static str,
     version: &'static str,
+    /// Transforms running right now (out of `max_concurrent`).
+    running_jobs: usize,
 }
 
-async fn health() -> impl IntoResponse {
+async fn health(State(state): State<AppState>) -> impl IntoResponse {
     Json(Health {
         status: "ok",
         service: "fileoptimize",
         version: env!("CARGO_PKG_VERSION"),
+        running_jobs: state.engine.running_jobs(),
     })
 }
 
-#[derive(Serialize)]
-struct Tools {
-    ghostscript: bool,
-    poppler: bool,
-}
-
+/// Everything a client program needs in order to pre-validate a request: the limits,
+/// the accepted actions, and whether this host has the PDF tools installed.
 #[derive(Serialize)]
 struct Info {
     service: &'static str,
     version: &'static str,
+    actions: [&'static str; 3],
+    quality_range: [u8; 2],
     max_upload_size: u64,
     max_image_pixels: u32,
     max_concurrent: usize,
     default_quality: u8,
     pdf_raster_dpi: u32,
-    tools: Tools,
+    tool_timeout_secs: u64,
+    /// Total working memory all concurrent jobs may hold at once.
+    memory_budget_mb: usize,
+    /// The part of that budget not currently reserved.
+    memory_available_mb: usize,
+    /// How long a retained result survives.
+    result_ttl_secs: u64,
+    /// Whether `/api/v1/*` demands an API key.
+    auth_required: bool,
+    tools: crate::engine::Tools,
 }
 
 async fn info(State(state): State<AppState>) -> impl IntoResponse {
+    let cfg = state.engine.config();
     Json(Info {
         service: "fileoptimize",
         version: env!("CARGO_PKG_VERSION"),
-        max_upload_size: state.config.max_upload_size,
-        max_image_pixels: state.config.max_image_pixels,
-        max_concurrent: state.config.max_concurrent,
-        default_quality: state.config.compression_default_quality,
-        pdf_raster_dpi: state.config.pdf_raster_dpi,
-        tools: Tools {
-            ghostscript: gs_available().await,
-            poppler: pdftoppm_available().await,
-        },
+        actions: [
+            Action::Compress.as_str(),
+            Action::ImageToPdf.as_str(),
+            Action::PdfToImage.as_str(),
+        ],
+        quality_range: [1, 100],
+        max_upload_size: cfg.max_upload_size,
+        max_image_pixels: cfg.max_image_pixels,
+        max_concurrent: cfg.max_concurrent,
+        default_quality: cfg.compression_default_quality,
+        pdf_raster_dpi: cfg.pdf_raster_dpi,
+        tool_timeout_secs: cfg.tool_timeout_secs,
+        memory_budget_mb: cfg.memory_budget_mb,
+        memory_available_mb: state.engine.available_memory_mb(),
+        result_ttl_secs: cfg.cleanup_ttl_secs,
+        auth_required: cfg.requires_api_key(),
+        tools: state.engine.tools().await,
     })
 }
 
@@ -142,66 +181,125 @@ async fn not_found() -> AppError {
 }
 
 // ---------------------------------------------------------------------------
-// Main processing endpoint
+// Processing
 // ---------------------------------------------------------------------------
 
-/// The actions this service understands. Names are kept in sync with the UI and the
-/// legacy Flask API so existing clients are unaffected.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Action {
-    Compress,
-    ImageToPdf,
-    PdfToImage,
+/// `POST /api/process` and `POST /upload` — unchanged legacy contract: a file in, a
+/// file out.
+async fn process_legacy(
+    State(state): State<AppState>,
+    multipart: Multipart,
+) -> AppResult<Response> {
+    respond(run_upload(&state, multipart).await?)
 }
 
-impl Action {
-    fn parse(raw: &str) -> AppResult<Self> {
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "" | "compress" => Ok(Action::Compress),
-            "image_to_pdf" | "image-to-pdf" => Ok(Action::ImageToPdf),
-            "pdf_to_image" | "pdf-to-image" => Ok(Action::PdfToImage),
-            other => Err(AppError::BadRequest(format!(
-                "invalid action '{other}': expected compress, image_to_pdf or pdf_to_image"
-            ))),
-        }
+/// `POST /api/v1/process` — the same form fields, additionally: API-key authentication
+/// and `store=1` to receive a JSON descriptor with a re-fetchable id.
+async fn process_v1(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<HashMap<String, String>>,
+    multipart: Multipart,
+) -> AppResult<Response> {
+    authorize(&state, &headers, &QueryMap::from(query))?;
+    let outcome = run_upload(&state, multipart).await?;
+    // `store=1` is answered with JSON; everything else with the file itself.
+    if outcome.id.is_some() {
+        return Ok(retained_json(outcome));
     }
+    respond(outcome)
 }
 
-/// `POST /api/process` — `multipart/form-data` with fields:
-/// `file` (binary), `action` (`compress` | `image_to_pdf` | `pdf_to_image`),
-/// `quality` (1..100, optional — drives `compress`).
-async fn process(State(state): State<AppState>, mut multipart: Multipart) -> AppResult<Response> {
-    // Bound concurrency — the primary protection against memory pressure under load.
-    // The permit is held for the whole transform and released on drop, including on
-    // every error path; client download time is deliberately *not* counted.
-    let permit = state
-        .semaphore
-        .clone()
-        .acquire_owned()
-        .await
-        .map_err(|_| AppError::Internal("processing gate closed".to_string()))?;
-
-    let result = run_job(&state, &mut multipart).await;
-    drop(permit);
-    result
+/// The reply for a retained job: an id, what happened to the file, and where to get it.
+fn retained_json(outcome: JobOutcome) -> Response {
+    let JobOutcome {
+        output,
+        original_name,
+        original_size,
+        quality,
+        id,
+        meta,
+    } = outcome;
+    let id = id
+        .as_ref()
+        .map(|i| i.as_str().to_string())
+        .unwrap_or_default();
+    let saved = output.filename.clone();
+    let kind = output.content_type.clone();
+    let output_size = output.size();
+    let action = meta
+        .as_ref()
+        .map(|m| m.action.clone())
+        .unwrap_or_else(|| Action::Compress.as_str().to_string());
+    let max_age_secs = meta.map(|m| m.max_age_secs).unwrap_or(0);
+    Json(Retained {
+        ok: true,
+        id: id.clone(),
+        action,
+        quality,
+        original_name,
+        original_size,
+        filename: saved,
+        content_type: kind,
+        output_size,
+        saved_bytes: original_size.saturating_sub(output_size),
+        download_path: format!("/api/v1/results/{id}"),
+        max_age_secs,
+    })
+    .into_response()
 }
 
-async fn run_job(state: &AppState, multipart: &mut Multipart) -> AppResult<Response> {
-    let mut work = state.new_workdir().await?;
+/// The reply for a normal (non-retained) job: the file itself.
+fn respond(mut outcome: JobOutcome) -> AppResult<Response> {
+    // Disjoint field borrows: the payload is mutable (the body takes it), the sizes are
+    // read alongside it.
+    build_download_response(
+        &mut outcome.output,
+        outcome.original_size,
+        &outcome.original_name,
+    )
+}
+
+/// The reply a client gets when it asked for the result to be retained.
+#[derive(Serialize)]
+struct Retained {
+    ok: bool,
+    id: String,
+    action: String,
+    quality: u8,
+    original_name: String,
+    original_size: u64,
+    filename: String,
+    content_type: String,
+    output_size: u64,
+    saved_bytes: u64,
+    download_path: String,
+    max_age_secs: u64,
+}
+
+/// Read the multipart form, hand the file to the engine, hand the result back.
+///
+/// The scratch dir is handed to the engine, which decides whether it survives the
+/// request (a streamed payload must outlive the response; everything else is deleted
+/// here, including on every error path).
+async fn run_upload(state: &AppState, mut multipart: Multipart) -> AppResult<JobOutcome> {
+    let work = state.engine.new_workdir().await?;
     let mut input_path: Option<PathBuf> = None;
     let mut action_raw = String::new();
     let mut quality_raw: Option<String> = None;
-    let mut original_name = String::from("file");
+    let mut client_name = String::from("file");
     let mut original_size: u64 = 0;
+    let mut store = false;
 
     while let Some(field) = multipart.next_field().await? {
         let name = field.name().unwrap_or_default().to_string();
         match name.as_str() {
             "file" => {
-                original_name = sanitize_filename(field.file_name().unwrap_or("file"));
-                let ext = extension_of(&original_name);
+                client_name = field.file_name().unwrap_or("file").to_string();
+                let ext = extension_of(&client_name);
                 let path = work.join(&format!("input.{ext}"));
-                original_size = stream_to_disk(field, &path, state.config.max_upload_size).await?;
+                original_size =
+                    stream_to_disk(field, &path, state.engine.config().max_upload_size).await?;
                 if original_size == 0 {
                     return Err(AppError::BadRequest("uploaded file is empty".to_string()));
                 }
@@ -209,8 +307,18 @@ async fn run_job(state: &AppState, multipart: &mut Multipart) -> AppResult<Respo
             }
             "action" => action_raw = field.text().await?,
             "quality" => quality_raw = Some(field.text().await?),
+            // `store` keeps the result addressable at `GET /api/v1/results/{id}` for the
+            // configured TTL, which is how a client that cannot stream a download — a
+            // queue consumer, a spreadsheet, a mobile app on a flaky link — uses us.
+            "store" => {
+                let raw = field.text().await?;
+                store = matches!(
+                    raw.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                );
+            }
             // Unknown fields are drained and ignored rather than rejected, so stray
-            // browser form extras can't fail an otherwise valid job.
+            // browser form extras cannot fail an otherwise valid job.
             _ => {
                 let _ = field.bytes().await?;
             }
@@ -219,37 +327,20 @@ async fn run_job(state: &AppState, multipart: &mut Multipart) -> AppResult<Respo
 
     let input_path =
         input_path.ok_or_else(|| AppError::BadRequest("no file provided".to_string()))?;
-    let action = Action::parse(&action_raw)?;
-    let quality = parse_quality(
+
+    let job = Job::from_fields(
+        Some(&action_raw),
         quality_raw.as_deref(),
-        state.config.compression_default_quality,
+        Some(&client_name),
+        Input::Uploaded {
+            dir: work,
+            path: input_path,
+        },
+        store,
+        state.engine.config().compression_default_quality,
     )?;
 
-    // Sniff only a header: enough to route the job, and it never loads a big PDF in full.
-    let head = read_header(&input_path, 64).await?;
-    let kind = detect(&head);
-
-    let mut output = match action {
-        Action::Compress => {
-            compress(&input_path, &kind, quality, &original_name, &work, state).await?
-        }
-        Action::ImageToPdf => image_to_pdf(&input_path, &kind, &original_name, state).await?,
-        Action::PdfToImage => {
-            pdf_to_image(&input_path, &kind, &original_name, &work, state).await?
-        }
-    };
-
-    // Must be sampled *before* the response consumes the output: a payload that is being
-    // streamed off disk has to outlive this function, so its directory is handed to the
-    // TTL sweeper instead of being deleted here. In-memory results are freed immediately.
-    let streamed = output.is_streamed();
-    let response = build_download_response(&mut output, original_size, &original_name)?;
-    if streamed {
-        work.keep();
-    }
-    drop(work);
-
-    Ok(response)
+    state.engine.run(job).await
 }
 
 /// Copy one multipart field to disk in chunks, enforcing the size cap as it goes.
@@ -277,196 +368,102 @@ async fn stream_to_disk(
 }
 
 // ---------------------------------------------------------------------------
-// Actions
+// Retained results
 // ---------------------------------------------------------------------------
 
-/// `compress` — images are re-encoded with a quality setting; PDFs go through Ghostscript.
-async fn compress(
-    input: &Path,
-    kind: &FileKind,
-    quality: u8,
-    original_name: &str,
-    work: &WorkDir,
-    state: &AppState,
-) -> AppResult<Output> {
-    match kind {
-        FileKind::Pdf => {
-            if !gs_available().await {
-                return Err(external_tool_missing("ghostscript", "PDF compression"));
-            }
-            let out_path = work.join("compressed.pdf");
-            compress_pdf(input, &out_path, quality, tool_timeout(state)).await?;
-            let base = base_name(original_name);
-            Ok(Output::from_path(
-                out_path,
-                format!("{base}_compressed.pdf"),
-                "application/pdf",
-            ))
-        }
-        FileKind::Image(fmt) => {
-            let data = tokio::fs::read(input).await?;
-            let fmt = *fmt;
-            let max_pixels = state.config.max_image_pixels;
-            // Codecs are CPU-bound: run them on the blocking pool so the async runtime
-            // keeps accepting and streaming other requests.
-            let (bytes, target) = tokio::task::spawn_blocking(move || {
-                let img = decode_checked(&data, fmt, max_pixels)?;
-                let target = pick_compress_format(fmt, quality);
-                Ok::<_, AppError>((encode_image(img, target, quality)?, target))
-            })
-            .await
-            .map_err(join_err)??;
+/// `GET /api/v1/results/{id}` — stream back a result the client asked to keep.
+async fn get_result(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<HashMap<String, String>>,
+    PathParam(raw): PathParam<String>,
+) -> AppResult<Response> {
+    authorize(&state, &headers, &QueryMap::from(query))?;
+    let id = JobId::parse(&raw)?;
+    let (mut output, meta) = state.engine.result(&id).await?;
+    build_download_response(&mut output, meta.original_size, &meta.original_name)
+}
 
-            let base = base_name(original_name);
-            Ok(Output::in_memory(
-                bytes,
-                format!("{base}_optimized.{}", ext_of(target)),
-                content_type_of(target),
-            ))
-        }
-        FileKind::Unknown => Err(AppError::UnsupportedMediaType(
-            "only images and PDFs can be compressed".to_string(),
+/// `DELETE /api/v1/results/{id}` — drop it early. A second delete is a 404, not an
+/// error, because the first one already succeeded.
+async fn delete_result(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<HashMap<String, String>>,
+    PathParam(raw): PathParam<String>,
+) -> AppResult<StatusCode> {
+    authorize(&state, &headers, &QueryMap::from(query))?;
+    let id = JobId::parse(&raw)?;
+    if state.engine.discard(&id).await? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(AppError::NotFound(
+            "no retained result with that id".to_string(),
+        ))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Authentication
+// ---------------------------------------------------------------------------
+
+/// API-key gate for the versioned surface. A no-op unless `API_KEYS` is configured, so
+/// a single-tenant deployment (or anything behind a gateway that authenticates) is
+/// unaffected by the code path.
+fn authorize(state: &AppState, headers: &HeaderMap, query: &QueryMap) -> AppResult<()> {
+    let cfg = state.engine.config();
+    if !cfg.requires_api_key() {
+        return Ok(());
+    }
+    let presented = key_from_headers(headers).or_else(|| query.api_key.clone());
+    match presented {
+        Some(key) if cfg.accepts_api_key(&key) => Ok(()),
+        Some(_) => Err(AppError::Unauthorized(
+            "the presented API key is not recognised".to_string(),
+        )),
+        None => Err(AppError::Unauthorized(
+            "an API key is required: send `x-api-key: <key>` or `Authorization: Bearer <key>`"
+                .to_string(),
         )),
     }
 }
 
-/// `image_to_pdf` — wrap a single image in a one-page PDF.
-///
-/// A baseline (non-CMYK) JPEG is embedded verbatim via `/DCTDecode`: no decode +
-/// re-encode round-trip at all, which means zero pixel-buffer allocation and no second
-/// lossy generation. Any other format is normalised to RGB JPEG first.
-async fn image_to_pdf(
-    input: &Path,
-    kind: &FileKind,
-    original_name: &str,
-    state: &AppState,
-) -> AppResult<Output> {
-    let fmt = match kind {
-        FileKind::Image(f) => *f,
-        FileKind::Pdf => {
-            return Err(AppError::BadRequest(
-                "that is already a PDF — use compress instead".to_string(),
-            ))
-        }
-        FileKind::Unknown => {
-            return Err(AppError::UnsupportedMediaType(
-                "image_to_pdf requires an image file".to_string(),
-            ))
-        }
-    };
-
-    let data = tokio::fs::read(input).await?;
-    let max_pixels = state.config.max_image_pixels;
-    let pdf = tokio::task::spawn_blocking(move || -> AppResult<Vec<u8>> {
-        let (w, h) = ::image::ImageReader::with_format(std::io::Cursor::new(&data), fmt)
-            .into_dimensions()?;
-        check_dimensions(w, h, max_pixels)?;
-
-        let jpeg: Vec<u8> = if fmt == ::image::ImageFormat::Jpeg && !jpeg_is_cmyk(&data) {
-            data
-        } else {
-            let img = decode_checked(&data, fmt, max_pixels)?;
-            encode_image(img, ::image::ImageFormat::Jpeg, IMAGE_PDF_EMBED_QUALITY)?
-        };
-        Ok(build_image_pdf(&jpeg, w, h, IMAGE_PDF_DPI))
+fn key_from_headers(headers: &HeaderMap) -> Option<String> {
+    let api_key = headers
+        .get("x-api-key")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string);
+    api_key.or_else(|| {
+        headers
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer ").or_else(|| v.strip_prefix("bearer ")))
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string)
     })
-    .await
-    .map_err(join_err)??;
-
-    let base = base_name(original_name);
-    Ok(Output::in_memory(
-        pdf,
-        format!("{base}.pdf"),
-        "application/pdf",
-    ))
 }
 
-/// `pdf_to_image` — rasterise pages. One page becomes a PNG, many become a streamed ZIP.
-async fn pdf_to_image(
-    input: &Path,
-    kind: &FileKind,
-    original_name: &str,
-    work: &WorkDir,
-    state: &AppState,
-) -> AppResult<Output> {
-    if !matches!(kind, FileKind::Pdf) {
-        return Err(AppError::UnsupportedMediaType(
-            "pdf_to_image requires a PDF file".to_string(),
-        ));
-    }
-    if !pdftoppm_available().await {
-        return Err(external_tool_missing(
-            "poppler-utils",
-            "PDF→image conversion",
-        ));
-    }
+/// `?api_key=` is accepted for clients that cannot set a header (server-rendered links,
+/// simple form posts). Documented as the less preferred option, since query strings end
+/// up in access logs.
+#[derive(Default)]
+struct QueryMap {
+    api_key: Option<String>,
+}
 
-    let img_dir = work.join("pages");
-    let files = pdf_to_images(
-        input,
-        &img_dir,
-        state.config.pdf_raster_dpi,
-        tool_timeout(state),
-    )
-    .await?;
-    let base = base_name(original_name);
-
-    if files.len() == 1 {
-        let only = files.into_iter().next().expect("length checked above");
-        let out_path = work.join(&format!("{base}.png"));
-        // rename() can fail across devices; a copy is a safe fallback.
-        if tokio::fs::rename(&only, &out_path).await.is_err() {
-            tokio::fs::copy(&only, &out_path).await?;
-            let _ = tokio::fs::remove_file(&only).await;
+impl From<HashMap<String, String>> for QueryMap {
+    fn from(map: HashMap<String, String>) -> Self {
+        QueryMap {
+            api_key: map.get("api_key").cloned(),
         }
-        let _ = tokio::fs::remove_dir(&img_dir).await;
-        return Ok(Output::from_path(
-            out_path,
-            format!("{base}.png"),
-            "image/png",
-        ));
     }
-
-    let entries: Vec<(String, PathBuf)> = files
-        .iter()
-        .enumerate()
-        .map(|(i, p)| (format!("page_{:04}.png", i + 1), p.clone()))
-        .collect();
-    let zip_path = work.join(&format!("{base}_images.zip"));
-    // Archiving is disk + CPU bound, so it also runs off the reactor.
-    let (archive_path, entries) = (zip_path.clone(), entries);
-    tokio::task::spawn_blocking(move || write_zip_from_files(&archive_path, &entries))
-        .await
-        .map_err(join_err)??;
-    // The pages are inside the archive now; drop them so the temp dir holds one file.
-    for f in &files {
-        let _ = tokio::fs::remove_file(f).await;
-    }
-    let _ = tokio::fs::remove_dir(&img_dir).await;
-
-    Ok(Output::from_path(
-        zip_path,
-        format!("{base}_images.zip"),
-        "application/zip",
-    ))
-}
-
-fn tool_timeout(state: &AppState) -> Duration {
-    Duration::from_secs(state.config.tool_timeout_secs)
-}
-
-fn external_tool_missing(tool: &str, what: &str) -> AppError {
-    AppError::ExternalToolMissing(format!(
-        "{tool} is required for {what} but is not installed on this server"
-    ))
-}
-
-fn join_err(e: tokio::task::JoinError) -> AppError {
-    AppError::Internal(format!("worker task failed: {e}"))
 }
 
 // ---------------------------------------------------------------------------
-// Response assembly
+// Response building
 // ---------------------------------------------------------------------------
 
 fn build_download_response(
@@ -536,10 +533,17 @@ fn build_download_response(
     Ok((StatusCode::OK, headers, body).into_response())
 }
 
-/// Insert a header, falling back to a known-good value if the payload can't be represented.
-fn insert_header(headers: &mut HeaderMap, key: HeaderName, value: &str, fallback: &str) {
-    let hv = HeaderValue::from_str(value)
-        .or_else(|_| HeaderValue::from_str(fallback))
-        .unwrap_or_else(|_| HeaderValue::from_static("0"));
-    headers.insert(key, hv);
+fn insert_header(headers: &mut HeaderMap, name: HeaderName, value: &str, fallback: &str) {
+    let value = if value.is_empty() { fallback } else { value };
+    match HeaderValue::from_str(value) {
+        Ok(v) => {
+            headers.insert(name, v);
+        }
+        Err(e) => {
+            // A value we built ourselves should always be header-safe; if it is not, the
+            // ASCII fallback keeps the response well-formed instead of failing it.
+            tracing::warn!(error = %e, "refused to emit header value");
+            headers.insert(name, HeaderValue::from_static(fallback));
+        }
+    }
 }

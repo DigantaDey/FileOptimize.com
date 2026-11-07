@@ -6,11 +6,18 @@ single self-contained Rust binary with a minimal, high-contrast web UI.
 **Live:** https://fileoptimize.com
 
 ```
-┌───────────────┐   multipart/form-data    ┌──────────────────────────────┐   spawn   ┌────────────────┐
-│  Browser UI   │ ───────────────────────▶ │  Axum / Tokio (Rust)         │ ────────▶ │  ghostscript   │
-│  (web/)       │ ◀─────────────────────── │  stream → sniff → transform  │ ◀──────── │  poppler       │
-└───────────────┘   streamed file download └──────────────────────────────┘           └────────────────┘
+┌────────────────┐  multipart/form-data   ┌────────────────────┐   ┌───────────────────────────┐   spawn   ┌──────────────┐
+│  Browser UI    │ ─────────────────────▶ │  Axum routes       │   │  Engine (src/engine.rs)   │ ────────▶ │  ghostscript   │
+│  (web/)        │ ◀───────────────────── │  stream · sniff    │◀─▶│  limits · memory · scratch│ ◀──────── │  poppler       │
+└────────────────┘  streamed file reply   └────────────────────┘   └───────────────────────────┘           └──────────────┘
+                                                    ▲
+                          another app / queue worker┴  same engine, no HTTP:  fileoptimize::engine::Engine
 ```
+
+The split matters: `routes` is transport (forms, headers, status codes, API keys) and holds **no**
+processing policy. Every bound is enforced in `Engine::run`, so an HTTP client, a legacy client and
+an embedded caller get byte-for-byte identical behaviour — which is what makes the crate safe to
+expose to other applications.
 
 ## Why Rust
 
@@ -29,6 +36,8 @@ problems:
 | Tool failures | traceback / empty 500 | typed errors → `400/413/415/500/503` with a JSON reason |
 | Shutdown | n/a | graceful drain on SIGINT/SIGTERM |
 | Concurrency | WSGI workers | one async reactor + a bounded blocking pool |
+| Peak memory under load | unbounded per worker | second, weighted semaphore: `MEMORY_BUDGET_MB` across all jobs |
+| Reuse | HTTP only, no contract | embeddable `Engine` + versioned `/api/v1/*` + `openapi.json` |
 
 ## Memory model
 
@@ -37,10 +46,14 @@ Three deliberately boring techniques do all the work:
 1. **Streaming in.** The multipart body is copied to disk in chunks. The request body is never
    materialised in memory, and `MAX_UPLOAD_SIZE_MB` is enforced *during* the copy, so an oversized
    upload is cut off at the byte it exceeds the cap rather than after a full read.
-2. **Bounded fan-out.** A `tokio::sync::Semaphore` of `MAX_CONCURRENT` permits gates every
-   transform. Under load, requests queue instead of each one allocating a fresh image decode buffer
-   — which is what actually protects RSS. CPU-heavy codec work runs on `spawn_blocking` so the
-   async reactor keeps streaming other connections.
+2. **Two bounded gates.** `MAX_CONCURRENT` (a plain semaphore) caps how many transforms run at
+   once; `MEMORY_BUDGET_MB` (a semaphore weighted in MiB) caps how much working memory those
+   transforms may hold *between them*. Before a decode, the job's peak is estimated from the
+   image header — `width × height × 8 B` for the RGBA and RGB8 buffers, plus the encoded file —
+   and that many MiB must be reserved or the job is refused with `413`. So 4000×4000 photos do not
+   each get to allocate 128 MB on the way to an OOM: the budget is what stops them, not luck.
+   Under load requests queue instead of failing, and CPU-heavy codec work runs on
+   `spawn_blocking` so the async reactor keeps streaming other connections.
 3. **Streaming out.** PDF compression and PDF→image never re-enter the heap: ghostscript/pdftoppm
    write into the request's work directory and the response is streamed from that file in 128 KiB
    slices. A 200 MB PDF costs the same resident memory as a 2 MB one.
@@ -62,8 +75,12 @@ is built.
 | `GET` | `/assets/style.css`, `/assets/script.js` | UI assets, embedded in the binary |
 | `POST` | `/api/process` | run a transform (multipart form) |
 | `POST` | `/upload` | legacy alias for `/api/process` |
-| `GET` | `/api/health` | liveness probe |
+| `GET` | `/api/health` | liveness probe (reports `running_jobs`) |
 | `GET` | `/api/info` | effective limits + which PDF tools are present |
+| `POST` | `/api/v1/process` | the machine-facing transform endpoint (API key, `store=1`) |
+| `GET`/`DELETE` | `/api/v1/results/{id}` | fetch or drop a retained result |
+| `GET` | `/api/v1/health`, `/api/v1/info`, `/api/v1/openapi.json` | versioned mirrors of the meta endpoints |
+| `GET` | `/api/openapi.json` | the OpenAPI 3.0 document of *this build* |
 | any | `*` | JSON `404` |
 
 `POST /api/process` fields:
@@ -73,6 +90,7 @@ is built.
 | `file` | binary | required, non-empty |
 | `action` | `compress` \| `image_to_pdf` \| `pdf_to_image` | default `compress`; hyphenated spellings accepted |
 | `quality` | `1`–`100` | optional, drives `compress` only (default `DEFAULT_QUALITY`) |
+| `store` | `1`/`true` | optional; retain the result and (on `/api/v1/process`) answer with JSON |
 
 Responses are file downloads. In addition to `Content-Disposition`, the service returns:
 
@@ -95,6 +113,34 @@ Download names are derived from the sanitised upload name, per action:
 
 Errors are JSON: `{ "error": "quality 101 out of range: must be between 1 and 100" }`.
 
+## Using it from another application
+
+[`docs/API.md`](docs/API.md) is the full integration guide. The short version:
+
+- **Programs** should call `POST /api/v1/process` and read `GET /api/v1/info` first (limits,
+  accepted actions, whether ghostscript/poppler exist here, whether a key is required).
+- **Callers that cannot stream a download** send `store=1` and get a JSON descriptor with an
+  `id`; the result is then `GET`/`DELETE`-able at `/api/v1/results/{id}` until the TTL sweeper
+  collects it. Retained payloads live in `TMP_DIR/results/`, expire like everything else, and
+  cannot be listed — holding the id *is* the capability.
+- **Errors are machine-readable**: `{"error": "...", "code": "payload_too_large"}`, with stable
+  codes for `400/401/404/413/415/500/503`.
+- **Rust callers** skip the transport entirely:
+
+```rust
+use fileoptimize::engine::{Action, Engine, Input, Job};
+
+let engine = Engine::from_env();
+let outcome = engine
+    .run(Job::new(Action::Compress, "holiday.jpg", Input::Bytes(bytes)).with_quality(70))
+    .await?;
+let payload = outcome.output.read_all()?;   // in memory or on disk, the caller's choice
+```
+
+The crate exposes `engine`, `config`, `error`, `processing`, `detect` and `sanitize`, so a
+downstream service can reuse the sniffing and the filename hardening without taking the HTTP
+dependency at all.
+
 ## Limits, checks and bounds
 
 Everything below is configurable and every limit produces a *specific* status code and message —
@@ -108,6 +154,8 @@ never a generic 500.
 | `MAX_UPLOAD_SIZE_MB` | `50` (1–500) | `413` while streaming the upload |
 | `MAX_IMAGE_PIXELS` | `25000000` | `400` before decoding (`1e6`–`1e8`) |
 | `MAX_CONCURRENT` | `4` (1–64) | queue depth |
+| `MEMORY_BUDGET_MB` | `1024` (16–65000) | `413` when one job alone would exceed it |
+| `API_KEYS` | *unset* | `401` on `/api/v1/*` when set |
 | `CLEANUP_TTL_SECS` | `1800` (60–86400) | temp-file lifetime |
 | `DEFAULT_QUALITY` | `60` (1–100) | used when `quality` is absent |
 | `PDF_RASTER_DPI` | `150` (36–600) | pdftoppm resolution |
@@ -124,6 +172,12 @@ Input validation:
   characters and non-ASCII are removed, and the name is truncated — header injection is not possible.
 - **Storage names are UUIDs** inside a per-request directory, so user input never influences a path.
 - **Quality is strictly bounded** to `1..=100`; `0`, `101`, `50.5`, `1e2` and non-numeric input fail.
+- **Memory is reserved before it is used**: a decode that cannot fit `MEMORY_BUDGET_MB` is refused
+  from the header dimensions, without touching a pixel buffer.
+- **Caller files are never mutated.** `Input::Path` is opened read-only; only the engine's own UUID
+  scratch directory is ever deleted.
+- **Result ids are format-checked** (exactly 32 lowercase hex characters) before they are used as a
+  directory name, so `..`, separators and case tricks cannot escape the results store.
 - **Malformed input cannot panic**: the JPEG marker walker (`detect::jpeg_is_cmyk`) tolerates
   truncation and never trusts a declared segment length beyond the buffer.
 - **Missing tools degrade visibly**: `/api/info` reports `ghostscript`/`poppler` availability, and a
@@ -172,8 +226,13 @@ ghostscript/poppler when they are installed and assert the documented `503` when
 docker build -t fileoptimize .
 docker run -d --name fileoptimize -p 8080:8080 \
   -e MAX_UPLOAD_SIZE_MB=50 -e MAX_CONCURRENT=4 \
+  -e MEMORY_BUDGET_MB=2048 \
+  -e API_KEYS="$(openssl rand -hex 24)" \
   fileoptimize
 ```
+
+`MEMORY_BUDGET_MB` is the knob to match to the container's memory limit; `API_KEYS` turns on
+key auth for `/api/v1/*` (leave it unset to serve anyone, which is what a public demo wants).
 
 Or behind any reverse proxy:
 
@@ -200,8 +259,9 @@ src/
   main.rs            boot, tracing, graceful shutdown
   lib.rs             router + middleware (tracing, CORS, selective gzip)
   config.rs          env-driven limits, clamped
-  state.rs           AppState + RAII WorkDir guard
-  routes.rs          handlers, multipart plumbing, response assembly
+  state.rs           AppState (config + engine handle) + RAII WorkDir guard
+  engine.rs          Engine, Job, JobId, JobOutcome — all policy lives here
+  routes.rs          HTTP transport: forms, headers, status codes, API keys
   detect.rs          magic-byte sniffing, YCCK JPEG probe
   sanitize.rs        filename/extension hardening
   cleanup.rs         TTL sweeper for streamed artifacts
@@ -212,14 +272,17 @@ src/
     pdf.rs           ghostscript + pdftoppm wrappers (timeouts, stderr)
     pdf_gen.rs       dependency-free one-page PDF writer
     zip.rs           streaming archive writer
-web/                 index.html · style.css · script.js   (embedded via include_str!)
-tests/               unit.rs · api.rs
+web/                 index.html · style.css · script.js · openapi.json   (embedded via include_str!)
+docs/API.md          integration guide for other applications
+tests/               unit.rs · api.rs · engine.rs
 ```
 
 ## Migration notes
 
 - `POST /upload` still accepts the original field names, so existing clients keep working; new
-  clients should use `POST /api/process`.
+  clients should use `POST /api/process`, and programs should prefer `POST /api/v1/process`.
+- Error bodies gained a `code` field alongside `error`. Anything that only read `error` is
+  unaffected.
 - Errors that used to surface as an HTML traceback now return a status code and a one-line JSON
   `error` — including `503` when ghostscript or poppler is missing.
 - `quality` now accepts `1..=100` (previously `10..=100` in the UI).

@@ -57,6 +57,31 @@ impl Output {
         self.path.is_some()
     }
 
+    /// Take the in-memory payload, if there is one (`None` for a streamed result).
+    pub fn take_data(&mut self) -> Option<Vec<u8>> {
+        self.data.take()
+    }
+
+    /// The whole payload as bytes — from memory when it is already there, otherwise read
+    /// from disk. Convenient for library callers that would rather not stream.
+    pub fn read_all(&self) -> crate::error::AppResult<Vec<u8>> {
+        if let Some(data) = &self.data {
+            return Ok(data.clone());
+        }
+        match &self.path {
+            Some(p) => Ok(std::fs::read(p)?),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// Open the on-disk payload, so a caller can copy or hash it without buffering it.
+    pub fn open_file(&self) -> crate::error::AppResult<Option<std::fs::File>> {
+        match &self.path {
+            Some(p) => Ok(Some(std::fs::File::open(p)?)),
+            None => Ok(None),
+        }
+    }
+
     /// Best-effort size in bytes (in-memory or on-disk).
     pub fn size(&self) -> u64 {
         if let Some(d) = &self.data {

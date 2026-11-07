@@ -19,6 +19,24 @@ async fn main() {
         eprintln!("fatal: could not create tmp dir {}: {e}", tmp_dir.display());
         std::process::exit(1);
     }
+    // Retained results (`store=1`) live under TMP_DIR/results; create it now so the
+    // first request does not have to, and so the sweeper has a stable container.
+    let results_dir = config.results_dir();
+    if let Err(e) = tokio::fs::create_dir_all(&results_dir).await {
+        eprintln!(
+            "fatal: could not create results dir {}: {e}",
+            results_dir.display()
+        );
+        std::process::exit(1);
+    }
+
+    tracing::info!(
+        max_concurrent = config.max_concurrent,
+        memory_budget_mb = config.memory_budget_mb,
+        max_upload_size_mb = config.max_upload_size / (1024 * 1024),
+        auth = config.requires_api_key(),
+        "engine configured"
+    );
 
     let state = AppState::new(config.clone());
     cleanup::spawn(state.clone());

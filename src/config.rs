@@ -28,7 +28,21 @@ pub struct Config {
     pub pdf_raster_dpi: u32,
     /// Wall-clock limit for external tools (ghostscript / pdftoppm).
     pub tool_timeout_secs: u64,
+    /// Total memory (MB) the service may keep *in flight* across all concurrent jobs.
+    /// Each job reserves an estimate of its peak (decoded pixels + buffers) from this
+    /// budget before it decodes anything, so a burst of large images queues instead of
+    /// swapping the process to death. `max_concurrent` bounds how many jobs run;
+    /// `memory_budget_mb` bounds how much they may hold at once.
+    pub memory_budget_mb: usize,
+    /// API keys accepted on the versioned, machine-facing API (`/api/v1/*`).
+    /// Empty (the default) means the v1 API is open, which is the right choice for a
+    /// single-tenant deployment behind a gateway that already authenticates.
+    pub api_keys: Vec<String>,
 }
+
+/// Name of the subdirectory of `TMP_DIR` that holds results clients asked to retain.
+/// Kept out of the top-level sweep so it is never deleted wholesale.
+pub const RESULTS_DIR_NAME: &str = "results";
 
 /// Generous but safe ceilings for `MAX_IMAGE_PIXELS` (25 MP ≈ 750 MB decoded RGB).
 const MIN_PIXELS: u32 = 100 * 100;
@@ -51,6 +65,8 @@ impl Config {
             compression_default_quality: env_parsed("DEFAULT_QUALITY", 60u8).clamp(1, 100),
             pdf_raster_dpi: env_parsed("PDF_RASTER_DPI", 150u32).clamp(36, 600),
             tool_timeout_secs: env_parsed("TOOL_TIMEOUT_SECS", 120u64).clamp(5, 1800),
+            memory_budget_mb: env_parsed::<usize>("MEMORY_BUDGET_MB", 1024).clamp(16, 65_000),
+            api_keys: env_list("API_KEYS"),
         };
         cfg.validate();
         cfg
@@ -60,6 +76,22 @@ impl Config {
     fn validate(&self) {
         assert!(self.max_concurrent >= 1, "MAX_CONCURRENT must be >= 1");
         assert!(self.max_upload_size > 0, "MAX_UPLOAD_SIZE must be > 0");
+    }
+
+    /// `true` when the v1 API must present one of [`Config::api_keys`].
+    pub fn requires_api_key(&self) -> bool {
+        !self.api_keys.is_empty()
+    }
+
+    /// Accept `key` if the API is open, or if it matches a configured key exactly.
+    pub fn accepts_api_key(&self, key: &str) -> bool {
+        let key = key.trim();
+        !key.is_empty() && self.api_keys.iter().any(|k| k == key)
+    }
+
+    /// Directory that retained results live in, relative to [`Config::tmp_dir`].
+    pub fn results_dir(&self) -> PathBuf {
+        self.tmp_dir.join(RESULTS_DIR_NAME)
     }
 
     /// `DefaultBodyLimit` headroom: the multipart framing, part headers and the
@@ -88,6 +120,20 @@ fn env_parsed<T: std::str::FromStr>(key: &str, default: T) -> T {
         .ok()
         .and_then(|v| v.trim().parse::<T>().ok())
         .unwrap_or(default)
+}
+
+/// Parse a comma/space separated list, dropping empty entries.
+fn env_list(key: &str) -> Vec<String> {
+    std::env::var(key)
+        .ok()
+        .map(|raw| {
+            raw.split([',', ' ', '\n', '\t'])
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn env_path(key: &str, default: PathBuf) -> PathBuf {

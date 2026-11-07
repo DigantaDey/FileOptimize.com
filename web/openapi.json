@@ -1,0 +1,425 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "FileOptimize API",
+    "version": "1.0.0",
+    "description": "Image and PDF compression/conversion. `/api/v1/*` is the versioned, machine-facing contract; `/api/process` and `/upload` are the original (Flask-compatible) endpoints kept for the bundled UI and legacy clients. Both run exactly the same engine, so limits and validation are identical.\n\nUploads are streamed to scratch space and never fully buffered; oversized files are refused mid-stream. Peak working memory across concurrent jobs is bounded by `MEMORY_BUDGET_MB`.\n\nErrors are always JSON `{ \"error\": message, \"code\": stable_identifier }`.",
+    "license": { "name": "MIT" }
+  },
+  "servers": [{ "url": "/", "description": "This instance" }],
+  "tags": [
+    { "name": "processing", "description": "Transforms" },
+    { "name": "results", "description": "Retained outputs" },
+    { "name": "meta", "description": "Health, limits and this document" }
+  ],
+  "security": [{ "ApiKeyAuth": [] }, { "BearerAuth": [] }],
+  "paths": {
+    "/api/v1/process": {
+      "post": {
+        "tags": ["processing"],
+        "summary": "Compress or convert one file",
+        "description": "Send `store=1` to keep the result addressable and receive a JSON descriptor (with `download_path`) instead of the file itself — useful when the caller cannot consume a streamed body. Retained results expire after `result_ttl_secs` (see `/api/v1/info`).",
+        "operationId": "processV1",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": ["file"],
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": "The file to transform. Must be non-empty and at most `max_upload_size` bytes. Its type is detected from magic bytes, not from the filename or Content-Type."
+                  },
+                  "action": { "$ref": "#/components/schemas/Action" },
+                  "quality": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100,
+                    "description": "Only meaningful for `compress`. Omit to use `default_quality`. A PNG compressed at quality >= 90 is kept as PNG (lossless beats lossy there)."
+                  },
+                  "store": {
+                    "type": "string",
+                    "description": "`1`, `true`, `yes` or `on` to retain the result and answer with JSON. Any other value (including absence) means the file is returned directly."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The transformed file, or a JSON descriptor when `store` was requested.",
+            "content": {
+              "application/octet-stream": {
+                "schema": { "type": "string", "format": "binary" },
+                "headers": {
+                  "Content-Disposition": {
+                    "description": "`attachment; filename=\"<sanitised name>\"`",
+                    "schema": { "type": "string" }
+                  },
+                  "X-Original-Size": {
+                    "description": "Bytes received.",
+                    "schema": { "type": "integer", "format": "int64" }
+                  },
+                  "X-Output-Size": {
+                    "description": "Bytes returned.",
+                    "schema": { "type": "integer", "format": "int64" }
+                  },
+                  "X-Original-Filename": {
+                    "description": "The client's filename, sanitised.",
+                    "schema": { "type": "string" }
+                  }
+                }
+              },
+              "application/json": { "schema": { "$ref": "#/components/schemas/Retained" } }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": {
+            "description": "No API key was supplied, or it is not one of the configured keys. Only possible when the server was started with `API_KEYS`.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/Error" } }
+            }
+          },
+          "413": { "$ref": "#/components/responses/PayloadTooLarge" },
+          "415": { "$ref": "#/components/responses/Unsupported" },
+          "503": { "$ref": "#/components/responses/ToolMissing" }
+        }
+      }
+    },
+    "/api/process": {
+      "post": {
+        "tags": ["processing"],
+        "summary": "Compress or convert one file (unversioned alias)",
+        "description": "Identical to `/api/v1/process` without the API-key requirement, for the bundled UI and for deployments that authenticate at a gateway.",
+        "operationId": "process",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": ["file"],
+                "properties": {
+                  "file": { "type": "string", "format": "binary" },
+                  "action": { "$ref": "#/components/schemas/Action" },
+                  "quality": { "type": "integer", "minimum": 1, "maximum": 100 },
+                  "store": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The transformed file.",
+            "content": {
+              "application/octet-stream": { "schema": { "type": "string", "format": "binary" } }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "413": { "$ref": "#/components/responses/PayloadTooLarge" },
+          "415": { "$ref": "#/components/responses/Unsupported" },
+          "503": { "$ref": "#/components/responses/ToolMissing" }
+        }
+      }
+    },
+    "/upload": {
+      "post": {
+        "tags": ["processing"],
+        "summary": "Legacy alias of `/api/process`",
+        "description": "Kept so clients written against the original Python service keep working.",
+        "operationId": "processLegacy",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": ["file"],
+                "properties": {
+                  "file": { "type": "string", "format": "binary" },
+                  "action": { "$ref": "#/components/schemas/Action" },
+                  "quality": { "type": "integer", "minimum": 1, "maximum": 100 }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The transformed file.",
+            "content": {
+              "application/octet-stream": { "schema": { "type": "string", "format": "binary" } }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "413": { "$ref": "#/components/responses/PayloadTooLarge" },
+          "415": { "$ref": "#/components/responses/Unsupported" },
+          "503": { "$ref": "#/components/responses/ToolMissing" }
+        }
+      }
+    },
+    "/api/v1/results/{id}": {
+      "get": {
+        "tags": ["results"],
+        "summary": "Download a retained result",
+        "operationId": "getResult",
+        "parameters": [
+          { "$ref": "#/components/parameters/ResultId" },
+          { "$ref": "#/components/parameters/ApiKeyQuery" }
+        ],
+        "responses": {
+          "200": {
+            "description": "The retained bytes, streamed from disk.",
+            "content": {
+              "application/octet-stream": { "schema": { "type": "string", "format": "binary" } }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "description": "Missing or unknown API key." },
+          "404": {
+            "description": "Never stored, already fetched-and-expired, or swept.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/Error" } }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": ["results"],
+        "summary": "Discard a retained result early",
+        "description": "Frees the disk immediately instead of waiting for the sweeper.",
+        "operationId": "deleteResult",
+        "parameters": [
+          { "$ref": "#/components/parameters/ResultId" },
+          { "$ref": "#/components/parameters/ApiKeyQuery" }
+        ],
+        "responses": {
+          "204": { "description": "Removed." },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "description": "Missing or unknown API key." },
+          "404": { "description": "Nothing retained under that id." }
+        }
+      }
+    },
+    "/api/v1/info": {
+      "get": {
+        "tags": ["meta"],
+        "summary": "Effective limits, accepted actions and tool availability",
+        "description": "Read this once at startup and pre-validate before sending files. Always public, even when `API_KEYS` is set.",
+        "operationId": "infoV1",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Current configuration.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/Info" } }
+            }
+          }
+        }
+      }
+    },
+    "/api/info": {
+      "get": {
+        "tags": ["meta"],
+        "summary": "Same as `/api/v1/info`",
+        "operationId": "info",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Current configuration.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/Info" } }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/health": {
+      "get": {
+        "tags": ["meta"],
+        "summary": "Liveness probe",
+        "operationId": "healthV1",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Alive.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/Health" } }
+            }
+          }
+        }
+      }
+    },
+    "/api/health": {
+      "get": {
+        "tags": ["meta"],
+        "summary": "Same as `/api/v1/health`",
+        "operationId": "health",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Alive.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/Health" } }
+            }
+          }
+        }
+      }
+    },
+    "/api/openapi.json": {
+      "get": {
+        "tags": ["meta"],
+        "summary": "This document",
+        "operationId": "openapi",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "The OpenAPI 3.0 document of the running build.",
+            "content": { "application/json": { "schema": { "type": "object" } } }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "ApiKeyAuth": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "x-api-key",
+        "description": "Only enforced when the server was configured with `API_KEYS`; any listed key is accepted."
+      },
+      "BearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Equivalent to `x-api-key`: send `Authorization: Bearer <key>`."
+      }
+    },
+    "parameters": {
+      "ResultId": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "description": "`id` from a `store=1` response: 32 lowercase hex characters. Anything else is rejected before the filesystem is touched.",
+        "schema": { "type": "string", "pattern": "^[0-9a-f]{32}$" }
+      },
+      "ApiKeyQuery": {
+        "name": "api_key",
+        "in": "query",
+        "required": false,
+        "description": "Fallback for clients that cannot set headers. Prefer a header: query strings land in access logs.",
+        "schema": { "type": "string" }
+      }
+    },
+    "schemas": {
+      "Action": {
+        "type": "string",
+        "enum": ["compress", "image_to_pdf", "pdf_to_image"],
+        "default": "compress",
+        "description": "`compress` re-encodes an image at `quality` or re-distils a PDF with Ghostscript; `image_to_pdf` wraps one image in a page; `pdf_to_image` rasterises every page (one page gives a PNG, several a ZIP)."
+      },
+      "Error": {
+        "type": "object",
+        "required": ["error", "code"],
+        "properties": {
+          "error": { "type": "string", "description": "Human-readable explanation." },
+          "code": {
+            "type": "string",
+            "enum": [
+              "bad_request",
+              "not_found",
+              "payload_too_large",
+              "unsupported_media_type",
+              "external_tool_missing",
+              "unauthorized",
+              "internal_error"
+            ],
+            "description": "Stable identifier. Branch on this, not on the message."
+          }
+        }
+      },
+      "Retained": {
+        "type": "object",
+        "required": ["ok", "id", "download_path"],
+        "properties": {
+          "ok": { "type": "boolean", "enum": [true] },
+          "id": { "type": "string", "description": "Unguessable result id." },
+          "action": { "$ref": "#/components/schemas/Action" },
+          "quality": { "type": "integer" },
+          "original_name": { "type": "string", "description": "Sanitised client filename." },
+          "original_size": { "type": "integer", "format": "int64" },
+          "filename": { "type": "string", "description": "Download name of the output." },
+          "content_type": { "type": "string" },
+          "output_size": { "type": "integer", "format": "int64" },
+          "saved_bytes": { "type": "integer", "format": "int64" },
+          "download_path": { "type": "string", "description": "Relative URL; combine with the server base." },
+          "max_age_secs": { "type": "integer", "description": "How long the result is kept." }
+        }
+      },
+      "Info": {
+        "type": "object",
+        "properties": {
+          "service": { "type": "string" },
+          "version": { "type": "string" },
+          "actions": { "type": "array", "items": { "$ref": "#/components/schemas/Action" } },
+          "quality_range": {
+            "type": "array",
+            "items": { "type": "integer" },
+            "description": "[min, max] inclusive."
+          },
+          "max_upload_size": { "type": "integer", "format": "int64", "description": "Bytes." },
+          "max_image_pixels": { "type": "integer", "format": "int64", "description": "Width x height ceiling, checked before decoding." },
+          "max_concurrent": { "type": "integer", "description": "Transforms running at once." },
+          "default_quality": { "type": "integer" },
+          "pdf_raster_dpi": { "type": "integer" },
+          "tool_timeout_secs": { "type": "integer" },
+          "memory_budget_mb": { "type": "integer", "description": "Total working memory all concurrent transforms may hold." },
+          "memory_available_mb": { "type": "integer", "description": "Unreserved part of that budget right now." },
+          "result_ttl_secs": { "type": "integer", "description": "Retention window for `store=1`." },
+          "auth_required": { "type": "boolean", "description": "Whether `/api/v1/*` needs a key." },
+          "tools": {
+            "type": "object",
+            "properties": {
+              "ghostscript": { "type": "boolean", "description": "Needed by PDF compression." },
+              "poppler": { "type": "boolean", "description": "Needed by PDF to image conversion." }
+            }
+          }
+        }
+      },
+      "Health": {
+        "type": "object",
+        "properties": {
+          "status": { "type": "string", "enum": ["ok"] },
+          "service": { "type": "string" },
+          "version": { "type": "string" },
+          "running_jobs": { "type": "integer" }
+        }
+      }
+    },
+    "responses": {
+      "BadRequest": {
+        "description": "Malformed request: no file, empty file, bad `action`, `quality` outside 1-100, image beyond the pixel budget, or an unusable result id.",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+      },
+      "PayloadTooLarge": {
+        "description": "The file (or the memory its decode would need) exceeds the configured budget. The message names the knob to turn.",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+      },
+      "Unsupported": {
+        "description": "The file's real type cannot be used for this action, judged from its magic bytes.",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+      },
+      "ToolMissing": {
+        "description": "This host has no ghostscript/poppler for a PDF action. Check `tools` in `/api/v1/info`.",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+      }
+    }
+  }
+}

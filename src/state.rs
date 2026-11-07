@@ -2,27 +2,38 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::Semaphore;
 
 use crate::config::Config;
+use crate::engine::Engine;
 use crate::error::AppResult;
 
 /// Cheap to clone; the inner `Arc`s make it effectively a handle to shared state.
+///
+/// The HTTP layer owns *transport* concerns and delegates everything else to
+/// [`Engine`], so an embedder can construct an `Engine` on its own and never touch a
+/// router at all.
 #[derive(Clone)]
 pub struct AppState {
+    /// Effective configuration, shared with the engine so neither can drift.
     pub config: Arc<Config>,
-    /// Limits concurrent processing jobs — the primary memory-bounding mechanism.
-    pub semaphore: Arc<Semaphore>,
+    /// The processing engine every handler runs its work through.
+    pub engine: Arc<Engine>,
     pub tmp_dir: Arc<PathBuf>,
 }
 
 impl AppState {
     pub fn new(config: Config) -> Self {
-        let semaphore = Arc::new(Semaphore::new(config.max_concurrent.max(1)));
+        AppState::from_arc(Arc::new(config))
+    }
+
+    /// Build the state around an existing shared config (handy when the embedder keeps
+    /// a handle to it as well).
+    pub fn from_arc(config: Arc<Config>) -> Self {
         let tmp_dir = Arc::new(config.tmp_dir.clone());
+        let engine = Arc::new(Engine::from_config(Arc::clone(&config)));
         AppState {
-            config: Arc::new(config),
-            semaphore,
+            config,
+            engine,
             tmp_dir,
         }
     }
@@ -31,12 +42,7 @@ impl AppState {
     /// [`WorkDir`] removes itself on drop unless the caller keeps it alive for a
     /// streamed response.
     pub async fn new_workdir(&self) -> AppResult<WorkDir> {
-        let dir = self.tmp_dir.join(uuid::Uuid::new_v4().simple().to_string());
-        tokio::fs::create_dir_all(&dir).await?;
-        Ok(WorkDir {
-            path: dir,
-            keep: false,
-        })
+        self.engine.new_workdir().await
     }
 }
 
@@ -52,6 +58,12 @@ pub struct WorkDir {
 }
 
 impl WorkDir {
+    /// Wrap an existing directory. Prefer [`AppState::new_workdir`], which also makes
+    /// sure the directory exists and is uniquely named.
+    pub fn new(path: PathBuf) -> Self {
+        WorkDir { path, keep: false }
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
     }

@@ -156,12 +156,15 @@ pub async fn pdf_to_images(
     tokio::fs::create_dir_all(out_dir).await?;
     let prefix = out_dir.join("page");
 
-    // Note: no `--` end-of-options marker — poppler's tools do not implement one, and
-    // would go looking for a file called `--`. Our paths are absolute and generated, so
-    // an option-looking argument cannot occur here.
+    // Two argv details that matter, both learned from the tool rather than from the
+    // man page: `-r` wants its value as a separate argument (`-r150` is parsed as an
+    // unknown option and pdftoppm exits with its usage banner), and there is no `--`
+    // end-of-options marker (`--` would be opened as a file). Our paths are absolute and
+    // generated, so an option-looking argument cannot occur here.
     let child = Command::new("pdftoppm")
         .arg("-png")
-        .arg(format!("-r{dpi}"))
+        .arg("-r")
+        .arg(dpi.to_string())
         .arg(input)
         .arg(&prefix)
         .stdin(Stdio::null())
