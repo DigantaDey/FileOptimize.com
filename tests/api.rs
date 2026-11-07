@@ -43,7 +43,8 @@ fn test_config(max_upload: u64, max_pixels: u32) -> Config {
     }
 }
 
-fn app(cfg: Config) -> (axum::Router, PathBuf) {
+/// Build the router under test, plus the temp root it was configured with.
+fn build_app(cfg: Config) -> (axum::Router, PathBuf) {
     let root = cfg.tmp_dir.clone();
     (routes::router(AppState::new(cfg)), root)
 }
@@ -145,7 +146,7 @@ fn leftovers(root: &std::path::Path) -> usize {
 
 #[tokio::test]
 async fn health_and_info_report_the_limits() {
-    let (app, root) = app(test_config(1024 * 1024, 1_000_000));
+    let (app, root) = build_app(test_config(1024 * 1024, 1_000_000));
     let (status, _, body) = send(
         &app,
         Request::get("/api/health").body(Body::empty()).unwrap(),
@@ -196,7 +197,7 @@ async fn the_router_with_middleware_serves_the_page() {
 
 #[tokio::test]
 async fn serves_the_single_page_ui() {
-    let (app, root) = app(test_config(1024 * 1024, 1_000_000));
+    let (app, root) = build_app(test_config(1024 * 1024, 1_000_000));
 
     for (uri, needle, ctype) in [
         ("/", "<!DOCTYPE html>", "text/html"),
@@ -232,7 +233,7 @@ async fn serves_the_single_page_ui() {
 
 #[tokio::test]
 async fn rejects_requests_without_a_file() {
-    let (app, root) = app(test_config(1024 * 1024, 1_000_000));
+    let (app, root) = build_app(test_config(1024 * 1024, 1_000_000));
     let body = multipart(&[("action", None, b"compress")]);
     let (status, _, bytes) = send(&app, post_process(body)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -243,7 +244,7 @@ async fn rejects_requests_without_a_file() {
 
 #[tokio::test]
 async fn rejects_empty_uploads() {
-    let (app, root) = app(test_config(1024 * 1024, 1_000_000));
+    let (app, root) = build_app(test_config(1024 * 1024, 1_000_000));
     let body = multipart(&[
         ("action", None, b"compress"),
         ("file", Some("empty.png"), b""),
@@ -257,7 +258,7 @@ async fn rejects_empty_uploads() {
 
 #[tokio::test]
 async fn rejects_unknown_actions() {
-    let (app, root) = app(test_config(1024 * 1024, 1_000_000));
+    let (app, root) = build_app(test_config(1024 * 1024, 1_000_000));
     let body = multipart(&[("action", None, b"rm_-rf"), ("file", Some("a.png"), &png())]);
     let (status, _, bytes) = send(&app, post_process(body)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -278,7 +279,7 @@ async fn rejects_out_of_range_quality() {
         ("-5", true),
         ("50", false),
     ] {
-        let (app, root) = app(test_config(4 * 1024 * 1024, 1_000_000));
+        let (app, root) = build_app(test_config(4 * 1024 * 1024, 1_000_000));
         let body = multipart(&[
             ("action", None, b"compress"),
             ("quality", None, q.as_bytes()),
@@ -298,7 +299,7 @@ async fn rejects_out_of_range_quality() {
 
 #[tokio::test]
 async fn rejects_non_image_for_image_to_pdf() {
-    let (app, root) = app(test_config(1024 * 1024, 1_000_000));
+    let (app, root) = build_app(test_config(1024 * 1024, 1_000_000));
     let body = multipart(&[
         ("action", None, b"image_to_pdf"),
         (
@@ -315,7 +316,7 @@ async fn rejects_non_image_for_image_to_pdf() {
 
 #[tokio::test]
 async fn rejects_pdf_for_image_to_pdf() {
-    let (app, root) = app(test_config(1024 * 1024, 1_000_000));
+    let (app, root) = build_app(test_config(1024 * 1024, 1_000_000));
     let body = multipart(&[
         ("action", None, b"image_to_pdf"),
         ("file", Some("doc.pdf"), &valid_pdf()),
@@ -332,7 +333,7 @@ async fn rejects_pdf_for_image_to_pdf() {
 
 #[tokio::test]
 async fn rejects_non_pdf_for_pdf_to_image() {
-    let (app, root) = app(test_config(1024 * 1024, 1_000_000));
+    let (app, root) = build_app(test_config(1024 * 1024, 1_000_000));
     let body = multipart(&[
         ("action", None, b"pdf_to_image"),
         ("file", Some("fake.png"), &png()),
@@ -347,7 +348,7 @@ async fn rejects_non_pdf_for_pdf_to_image() {
 async fn enforces_the_upload_size_cap_with_a_precise_error() {
     // Payload sits above the 4 KiB file cap but below the request-body guard, so the
     // service's own check is what fires — and it must leave nothing on disk.
-    let (app, root) = app(4 * 1024, 1_000_000);
+    let (app, root) = build_app(test_config(4 * 1024, 1_000_000));
     let big = vec![0u8; 24 * 1024];
     let body = multipart(&[
         ("action", None, b"compress"),
@@ -367,7 +368,7 @@ async fn enforces_the_upload_size_cap_with_a_precise_error() {
 #[tokio::test]
 async fn framework_body_limit_rejects_absurd_requests() {
     // Way past both the file cap and the body guard: still a clean 413, not a hang.
-    let (app, root) = app(4 * 1024, 1_000_000);
+    let (app, root) = build_app(test_config(4 * 1024, 1_000_000));
     let huge = vec![7u8; 2 * 1024 * 1024];
     let body = multipart(&[("file", Some("huge.png"), &huge)]);
     let (status, _, _) = send(&app, post_process(body)).await;
@@ -383,7 +384,7 @@ async fn framework_body_limit_rejects_absurd_requests() {
 #[tokio::test]
 async fn rejects_oversized_image_dimensions() {
     // A 24×16 PNG, but the pixel budget is 100 px → must be refused before decoding.
-    let (app, root) = app(test_config(1024 * 1024, 100));
+    let (app, root) = build_app(test_config(1024 * 1024, 100));
     let body = multipart(&[
         ("action", None, b"compress"),
         ("file", Some("a.png"), &png()),
@@ -397,7 +398,7 @@ async fn rejects_oversized_image_dimensions() {
 #[tokio::test]
 async fn rejects_mislabelled_files() {
     // A text file named .png must not be treated as an image (magic-byte sniffing).
-    let (app, root) = app(test_config(1024 * 1024, 1_000_000));
+    let (app, root) = build_app(test_config(1024 * 1024, 1_000_000));
     let body = multipart(&[
         ("action", None, b"compress"),
         ("file", Some("lies.png"), b"i am not a png at all"),
@@ -414,7 +415,7 @@ async fn rejects_mislabelled_files() {
 
 #[tokio::test]
 async fn rejects_a_non_multipart_post() {
-    let (app, root) = app(test_config(1024 * 1024, 1_000_000));
+    let (app, root) = build_app(test_config(1024 * 1024, 1_000_000));
     let req = Request::post("/api/process")
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from("{}"))
@@ -426,7 +427,7 @@ async fn rejects_a_non_multipart_post() {
 
 #[tokio::test]
 async fn names_survive_sanitising_in_the_download_header() {
-    let (app, root) = app(test_config(4 * 1024 * 1024, 1_000_000));
+    let (app, root) = build_app(test_config(4 * 1024 * 1024, 1_000_000));
     let body = multipart(&[
         ("action", None, b"compress"),
         ("file", Some("../../evil\" name\r\nX: 1.png"), &png()),
@@ -450,7 +451,7 @@ async fn names_survive_sanitising_in_the_download_header() {
 
 #[tokio::test]
 async fn compresses_a_png_to_jpeg_and_reports_sizes() {
-    let (app, root) = app(test_config(4 * 1024 * 1024, 1_000_000));
+    let (app, root) = build_app(test_config(4 * 1024 * 1024, 1_000_000));
     let original = png();
     let body = multipart(&[
         ("action", None, b"compress"),
@@ -491,7 +492,7 @@ async fn compresses_a_png_to_jpeg_and_reports_sizes() {
 
 #[tokio::test]
 async fn keeps_png_lossless_at_top_quality() {
-    let (app, root) = app(test_config(4 * 1024 * 1024, 1_000_000));
+    let (app, root) = build_app(test_config(4 * 1024 * 1024, 1_000_000));
     let body = multipart(&[
         ("action", None, b"compress"),
         ("quality", None, b"100"),
@@ -512,7 +513,7 @@ async fn keeps_png_lossless_at_top_quality() {
 async fn uses_the_default_quality_when_none_is_sent() {
     let mut cfg = test_config(4 * 1024 * 1024, 1_000_000);
     cfg.compression_default_quality = 20;
-    let (app, root) = app(cfg);
+    let (app, root) = build_app(cfg);
     let body = multipart(&[
         ("action", None, b"compress"),
         ("file", Some("a.png"), &png()),
@@ -523,7 +524,7 @@ async fn uses_the_default_quality_when_none_is_sent() {
     // A higher default must produce a strictly larger file for the same input.
     let mut cfg = test_config(4 * 1024 * 1024, 1_000_000);
     cfg.compression_default_quality = 95;
-    let (app, root_hi) = app(cfg);
+    let (app, root_hi) = build_app(cfg);
     let body = multipart(&[
         ("action", None, b"compress"),
         ("file", Some("a.png"), &png()),
@@ -538,7 +539,7 @@ async fn uses_the_default_quality_when_none_is_sent() {
 
 #[tokio::test]
 async fn wraps_an_image_in_a_pdf() {
-    let (app, root) = app(test_config(4 * 1024 * 1024, 1_000_000));
+    let (app, root) = build_app(test_config(4 * 1024 * 1024, 1_000_000));
     let body = multipart(&[
         ("action", None, b"image_to_pdf"),
         ("file", Some("scan.png"), &png()),
@@ -566,7 +567,7 @@ async fn wraps_an_image_in_a_pdf() {
 async fn embeds_an_existing_jpeg_without_a_second_transcode() {
     // For JPEG input the original scan data must be carried over verbatim — no
     // re-encode, so quality is preserved and no pixel buffer is allocated.
-    let (app, root) = app(test_config(4 * 1024 * 1024, 1_000_000));
+    let (app, root) = build_app(test_config(4 * 1024 * 1024, 1_000_000));
     let src = jpeg();
     let body = multipart(&[
         ("action", None, b"image_to_pdf"),
@@ -583,7 +584,7 @@ async fn embeds_an_existing_jpeg_without_a_second_transcode() {
 
 #[tokio::test]
 async fn legacy_upload_alias_still_works() {
-    let (app, root) = app(test_config(4 * 1024 * 1024, 1_000_000));
+    let (app, root) = build_app(test_config(4 * 1024 * 1024, 1_000_000));
     let body = multipart(&[
         ("action", None, b"compress"),
         ("file", Some("a.png"), &png()),
@@ -607,7 +608,7 @@ async fn pdf_tools_either_work_or_are_reported_as_missing() {
     // Ghostscript/Poppler availability is host-dependent. Both outcomes must be
     // explicit and correct — a missing dependency is 503 with a clear message, never a
     // 500, and never a silently corrupted file.
-    let (app, root) = app(test_config(4 * 1024 * 1024, 1_000_000));
+    let (app, root) = build_app(test_config(4 * 1024 * 1024, 1_000_000));
     let pdf = valid_pdf();
 
     // compress
@@ -685,7 +686,7 @@ async fn pdf_tools_either_work_or_are_reported_as_missing() {
 
 #[tokio::test]
 async fn corrupt_pdf_yields_a_clean_error_not_a_panic() {
-    let (app, root) = app(test_config(4 * 1024 * 1024, 1_000_000));
+    let (app, root) = build_app(test_config(4 * 1024 * 1024, 1_000_000));
     let mut junk = b"%PDF-1.4\n".to_vec();
     junk.extend_from_slice(&[0u8; 512]);
     let body = multipart(&[
@@ -709,7 +710,7 @@ async fn corrupt_pdf_yields_a_clean_error_not_a_panic() {
 #[tokio::test]
 async fn concurrent_jobs_are_gated_but_all_complete() {
     // max_concurrent = 2 while 8 jobs are in flight: the gate must serialise, not drop.
-    let (app, root) = app(test_config(4 * 1024 * 1024, 1_000_000));
+    let (app, root) = build_app(test_config(4 * 1024 * 1024, 1_000_000));
 
     let mut handles = Vec::new();
     for i in 0..8 {

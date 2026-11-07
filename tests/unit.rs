@@ -11,9 +11,7 @@ use fileoptimize::sanitize::{extension_of, sanitize_ext, sanitize_filename};
 
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::PngEncoder;
-use image::{
-    ExtendedColorType, ImageBuffer, ImageEncoder, ImageFormat, Rgb, RgbImage,
-};
+use image::{ExtendedColorType, ImageBuffer, ImageEncoder, ImageFormat, Rgb, RgbImage};
 
 /// A deterministic 32×20 RGB gradient — small enough to keep the suite instant.
 fn sample_image() -> RgbImage {
@@ -253,7 +251,6 @@ fn image_pdf_has_valid_structure_and_xref_offsets() {
     // startxref must point at the real xref table.
     let start = text.rfind("startxref").expect("startxref");
     let offset: usize = text[start + 9..]
-        .trim()
         .split_whitespace()
         .next()
         .expect("xref offset")
