@@ -363,6 +363,9 @@ impl Engine {
     pub fn available_memory_mb(&self) -> usize {
         self.memory.available_permits()
     }
+
+    /// Jobs currently running (0..=`Config::max_concurrent`).
+    pub fn running_jobs(&self) -> usize {
         self.config
             .max_concurrent
             .saturating_sub(self.gate.available_permits())
@@ -383,6 +386,9 @@ impl Engine {
             })
             .await
     }
+
+    /// A fresh, unique working directory whose guard deletes it on drop.
+    pub async fn new_workdir(&self) -> AppResult<WorkDir> {
         let dir = self
             .config
             .tmp_dir
@@ -427,6 +433,9 @@ impl Engine {
 
         let mut output = match action {
             Action::Compress => {
+                self.compress(&mut prepared, &kind, quality, &original_name)
+                    .await?
+            }
             Action::ImageToPdf => {
                 self.image_to_pdf(&mut prepared, &kind, &original_name)
                     .await?
@@ -514,6 +523,9 @@ impl Engine {
             }
             Input::Path(path) => {
                 let size = tokio::fs::metadata(&path)
+                    .await
+                    .map(|m| m.len())
+                    .map_err(|_| {
                         AppError::BadRequest(format!("cannot read the file at {}", path.display()))
                     })?;
                 self.check_size(size)?;
@@ -523,6 +535,9 @@ impl Engine {
                     input: Some(path),
                     inline: None,
                     size,
+                })
+            }
+            Input::Uploaded { dir, path } => {
                 let size = tokio::fs::metadata(&path)
                     .await
                     .map(|m| m.len())

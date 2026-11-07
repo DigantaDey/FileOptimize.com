@@ -78,6 +78,9 @@ impl IntoResponse for AppError {
         if status.is_server_error() {
             tracing::error!(status = %status, code, error = %message, "request failed");
         } else {
+            tracing::debug!(status = %status, code, error = %message, "request rejected");
+        }
+
         let mut response =
             (status, Json(json!({ "error": message, "code": code }))).into_response();
         if status == StatusCode::UNAUTHORIZED {

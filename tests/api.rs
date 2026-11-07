@@ -919,6 +919,9 @@ async fn v1_returns_a_descriptor_and_a_refetchable_result() {
     assert_eq!(id.len(), 32, "unexpected id: {id}");
     assert_eq!(v["filename"].as_str(), Some("keep_optimized.jpg"));
     assert_eq!(v["action"].as_str(), Some("compress"));
+    assert_eq!(v["quality"].as_u64(), Some(50));
+    assert_eq!(v["original_size"].as_u64(), Some(original.len() as u64));
+    assert!(v["saved_bytes"].as_u64().unwrap_or(0) > 0, "{v}");
     let path = v["download_path"]
         .as_str()
         .expect("download_path")
@@ -930,6 +933,9 @@ async fn v1_returns_a_descriptor_and_a_refetchable_result() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(hdr(&headers, header::CONTENT_TYPE), "image/jpeg");
     assert_eq!(
+        hdr(&headers, header::CONTENT_DISPOSITION),
+        "attachment; filename=\"keep_optimized.jpg\""
+    );
     assert_eq!(
         again.len() as u64,
         v["output_size"].as_u64().expect("output_size")
@@ -1015,6 +1021,9 @@ async fn v1_demands_a_key_only_when_the_operator_configured_one() {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{name}: {}", err_of(&out));
+    }
+    let (status, _, out) = send(
+        &app,
         request("POST", "/api/v1/process?api_key=s3cret", body(), &[]),
     )
     .await;
@@ -1098,10 +1107,15 @@ async fn the_shipped_openapi_document_describes_the_real_routes() {
 #[tokio::test]
 async fn error_bodies_carry_a_stable_code() {
     let (app, root) = build_app(test_config(4 * 1024 * 1024, 1_000_000));
+    let cases: Vec<(&str, Vec<u8>)> = vec![
+        (
+            "bad_request",
             multipart(&[("action", None, b"shrink"), ("file", Some("a.png"), &png())]),
         ),
         (
             "unsupported_media_type",
+            multipart(&[
+                ("action", None, b"compress"),
                 (
                     "file",
                     Some("notes.txt"),

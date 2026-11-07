@@ -434,6 +434,9 @@ fn key_from_headers(headers: &HeaderMap) -> Option<String> {
         .filter(|v| !v.is_empty())
         .map(str::to_string);
     api_key.or_else(|| {
+        headers
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
             .and_then(|v| {
                 v.strip_prefix("Bearer ")
                     .or_else(|| v.strip_prefix("bearer "))
@@ -531,12 +534,7 @@ fn build_download_response(
     Ok((StatusCode::OK, headers, body).into_response())
 }
 
-fn insert_header(
-    headers: &mut HeaderMap,
-    name: HeaderName,
-    value: &str,
-    fallback: &'static str,
-) {
+fn insert_header(headers: &mut HeaderMap, name: HeaderName, value: &str, fallback: &'static str) {
     let value = if value.is_empty() { fallback } else { value };
     match HeaderValue::from_str(value) {
         Ok(v) => {
