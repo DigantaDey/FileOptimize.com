@@ -24,7 +24,8 @@
 //!
 //! # async fn demo() -> Result<(), fileoptimize::error::AppError> {
 //! let engine = Engine::from_env();
-//! let job = Job::new(Action::ImageToPdf, "scan.png", Input::Bytes(vec![]));
+//! let png = std::fs::read("scan.png").unwrap_or_default();
+//! let job = Job::new(Action::ImageToPdf, "scan.png", Input::Bytes(png));
 //! let outcome = engine.run(job).await?;
 //! let pdf = outcome.output.read_all()?;
 //! assert!(pdf.starts_with(b"%PDF-"));

@@ -15,12 +15,13 @@
 //!     .await?;
 //!
 //! // Everything a client or another service needs in order to report the job:
-//! let _sanitised = outcome.original_name; // safe to echo in a header
-//! let _saved = outcome.bytes_saved();
+//! let saved = outcome.original_size.saturating_sub(outcome.output.size());
+//! let download_name = outcome.output.filename.clone(); // sanitised, header-safe
 //!
 //! // The payload is either in memory or on disk; `read_all` covers both.
 //! let payload = outcome.output.read_all()?;
 //! assert!(!payload.is_empty());
+//! assert!(!download_name.is_empty() || saved > 0);
 //! # Ok(())
 //! # }
 //! ```
@@ -362,10 +363,9 @@ impl Engine {
     pub fn available_memory_mb(&self) -> usize {
         self.memory.available_permits()
     }
-
-    /// Jobs currently running (0..=`Config::max_concurrent`).
-    pub fn running_jobs(&self) -> usize {
-        self.config.max_concurrent.saturating_sub(self.gate.available_permits())
+        self.config
+            .max_concurrent
+            .saturating_sub(self.gate.available_permits())
     }
 
     /// Which external tools are installed. Probed once and cached for the process
@@ -383,10 +383,10 @@ impl Engine {
             })
             .await
     }
-
-    /// A fresh, unique working directory whose guard deletes it on drop.
-    pub async fn new_workdir(&self) -> AppResult<WorkDir> {
-        let dir = self.config.tmp_dir.join(uuid::Uuid::new_v4().simple().to_string());
+        let dir = self
+            .config
+            .tmp_dir
+            .join(uuid::Uuid::new_v4().simple().to_string());
         tokio::fs::create_dir_all(&dir).await?;
         Ok(WorkDir::new(dir))
     }
@@ -408,7 +408,7 @@ impl Engine {
         };
         let original_name = sanitize_filename(&filename);
 
-        let mut prepared = self.accept(input, &original_name).await?;
+        let mut prepared = self.accept(input).await?;
         let head = prepared.header().await?;
         let kind = detect(&head);
 
@@ -422,16 +422,19 @@ impl Engine {
             .acquire_owned()
             .await
             .map_err(|_| AppError::Internal("processing gate closed".to_string()))?;
-        let estimate = self.estimate(&action, &kind, &prepared)?;
+        let estimate = self.estimate(&kind, &prepared)?;
         let _memory = self.reserve_memory(estimate).await?;
 
         let mut output = match action {
             Action::Compress => {
-                self.compress(&mut prepared, &kind, quality, &original_name)
+            Action::ImageToPdf => {
+                self.image_to_pdf(&mut prepared, &kind, &original_name)
                     .await?
             }
-            Action::ImageToPdf => self.image_to_pdf(&mut prepared, &kind, &original_name).await?,
-            Action::PdfToImage => self.pdf_to_image(&mut prepared, &kind, &original_name).await?,
+            Action::PdfToImage => {
+                self.pdf_to_image(&mut prepared, &kind, &original_name)
+                    .await?
+            }
         };
 
         let original_size = prepared.size;
@@ -496,7 +499,7 @@ impl Engine {
     // ------------------------------------------------------------------ internals
 
     /// Materialise the input inside a scratch directory and check its size.
-    async fn accept(&self, input: Input, _name: &str) -> AppResult<Prepared> {
+    async fn accept(&self, input: Input) -> AppResult<Prepared> {
         match input {
             Input::Bytes(bytes) => {
                 let size = bytes.len() as u64;
@@ -511,13 +514,7 @@ impl Engine {
             }
             Input::Path(path) => {
                 let size = tokio::fs::metadata(&path)
-                    .await
-                    .map(|m| m.len())
-                    .map_err(|_| {
-                        AppError::BadRequest(format!(
-                            "cannot read the file at {}",
-                            path.display()
-                        ))
+                        AppError::BadRequest(format!("cannot read the file at {}", path.display()))
                     })?;
                 self.check_size(size)?;
                 let work = self.new_workdir().await?;
@@ -526,10 +523,10 @@ impl Engine {
                     input: Some(path),
                     inline: None,
                     size,
-                })
-            }
-            Input::Uploaded { dir, path } => {
-                let size = tokio::fs::metadata(&path).await.map(|m| m.len()).unwrap_or(0);
+                let size = tokio::fs::metadata(&path)
+                    .await
+                    .map(|m| m.len())
+                    .unwrap_or(0);
                 self.check_size(size)?;
                 Ok(Prepared {
                     work: dir,
@@ -556,12 +553,7 @@ impl Engine {
 
     /// Peak bytes this job may allocate. For images this is measured from the header
     /// (never a guess) so a decompression bomb is refused *before* it is decoded.
-    fn estimate(
-        &self,
-        action: &Action,
-        kind: &FileKind,
-        prepared: &Prepared,
-    ) -> AppResult<usize> {
+    fn estimate(&self, kind: &FileKind, prepared: &Prepared) -> AppResult<usize> {
         let needs_pixels = matches!(kind, FileKind::Image(_));
         if !needs_pixels {
             let base = TOOL_JOB_BASE_BYTES.saturating_add(prepared.size as usize / 4);
@@ -577,8 +569,8 @@ impl Engine {
         Ok(decode.saturating_add(prepared.size as usize).max(MIB))
     }
 
-    async fn reserve_memory(&self, bytes: usize) -> AppResult<OwnedSemaphorePermit<'static>> {
-        let need_mib = bytes.div_ceil(MIB).clamp(1, u16::MAX as usize);
+    async fn reserve_memory(&self, bytes: usize) -> AppResult<OwnedSemaphorePermit> {
+        let need_mib = bytes.div_ceil(MIB).max(1);
         if need_mib > self.config.memory_budget_mb {
             return Err(AppError::PayloadTooLarge(format!(
                 "this file needs an estimated {need_mib} MB of working memory, above the \
@@ -591,7 +583,7 @@ impl Engine {
         // process is shutting down.
         self.memory
             .clone()
-            .acquire_many_owned(need_mib as u16)
+            .acquire_many_owned(need_mib as u32)
             .await
             .map_err(|_| AppError::Internal("memory budget closed".to_string()))
     }
@@ -866,14 +858,14 @@ impl Prepared {
             }
         };
         let (w, h) = match &self.inline {
-            Some(bytes) => {
-                ::image::ImageReader::with_format(std::io::Cursor::new(bytes), fmt)
-                    .into_dimensions()?
-            }
+            Some(bytes) => ::image::ImageReader::with_format(std::io::Cursor::new(bytes), fmt)
+                .into_dimensions()?,
             None => {
+                // BufReader<File>, not Cursor<File>: a file is seekable, while
+                // Cursor<File> satisfies neither BufRead nor Seek.
                 let path = self.input_file()?;
-                let file = std::fs::File::open(path)?;
-                let reader = ::image::ImageReader::with_format(std::io::Cursor::new(file), fmt);
+                let file = std::io::BufReader::open(path)?;
+                let reader = ::image::ImageReader::with_format(file, fmt);
                 reader.into_dimensions()?
             }
         };

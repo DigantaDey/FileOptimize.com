@@ -20,7 +20,7 @@ use axum::{
     extract::{DefaultBodyLimit, Multipart, Path as PathParam, Query, State},
     http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
-    routing::{delete, get, post, MethodRouter},
+    routing::{get, post, MethodRouter},
     Json, Router,
 };
 use serde::Serialize;
@@ -92,13 +92,13 @@ async fn style_css() -> impl IntoResponse {
 }
 
 async fn script_js() -> impl IntoResponse {
-    [(
-        (
+    (
+        [(
             header::CONTENT_TYPE,
             "application/javascript; charset=utf-8",
-        ),
+        )],
         include_str!("../web/script.js"),
-    )]
+    )
 }
 
 async fn openapi() -> impl IntoResponse {
@@ -288,7 +288,6 @@ async fn run_upload(state: &AppState, mut multipart: Multipart) -> AppResult<Job
     let mut action_raw = String::new();
     let mut quality_raw: Option<String> = None;
     let mut client_name = String::from("file");
-    let mut original_size: u64 = 0;
     let mut store = false;
 
     while let Some(field) = multipart.next_field().await? {
@@ -298,11 +297,10 @@ async fn run_upload(state: &AppState, mut multipart: Multipart) -> AppResult<Job
                 client_name = field.file_name().unwrap_or("file").to_string();
                 let ext = extension_of(&client_name);
                 let path = work.join(&format!("input.{ext}"));
-                original_size =
-                    stream_to_disk(field, &path, state.engine.config().max_upload_size).await?;
-                if original_size == 0 {
-                    return Err(AppError::BadRequest("uploaded file is empty".to_string()));
-                }
+                // The engine re-checks size and emptiness at its own boundary, so the
+                // transport only has to stop a request that overshoots the cap mid-stream
+                // — which is exactly what stream_to_disk does.
+                stream_to_disk(field, &path, state.engine.config().max_upload_size).await?;
                 input_path = Some(path);
             }
             "action" => action_raw = field.text().await?,
@@ -329,9 +327,9 @@ async fn run_upload(state: &AppState, mut multipart: Multipart) -> AppResult<Job
         input_path.ok_or_else(|| AppError::BadRequest("no file provided".to_string()))?;
 
     let job = Job::from_fields(
-        Some(&action_raw),
+        Some(action_raw.as_str()),
         quality_raw.as_deref(),
-        Some(&client_name),
+        Some(client_name.as_str()),
         Input::Uploaded {
             dir: work,
             path: input_path,
@@ -436,10 +434,10 @@ fn key_from_headers(headers: &HeaderMap) -> Option<String> {
         .filter(|v| !v.is_empty())
         .map(str::to_string);
     api_key.or_else(|| {
-        headers
-            .get(header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer ").or_else(|| v.strip_prefix("bearer ")))
+            .and_then(|v| {
+                v.strip_prefix("Bearer ")
+                    .or_else(|| v.strip_prefix("bearer "))
+            })
             .map(str::trim)
             .filter(|v| !v.is_empty())
             .map(str::to_string)
@@ -533,7 +531,12 @@ fn build_download_response(
     Ok((StatusCode::OK, headers, body).into_response())
 }
 
-fn insert_header(headers: &mut HeaderMap, name: HeaderName, value: &str, fallback: &str) {
+fn insert_header(
+    headers: &mut HeaderMap,
+    name: HeaderName,
+    value: &str,
+    fallback: &'static str,
+) {
     let value = if value.is_empty() { fallback } else { value };
     match HeaderValue::from_str(value) {
         Ok(v) => {

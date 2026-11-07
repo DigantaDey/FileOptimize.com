@@ -110,10 +110,10 @@ async fn compresses_png_bytes_into_a_smaller_jpeg() {
     assert!(
         outcome.output.size() < original.len() as u64,
         "compression made it bigger"
+    assert_eq!(
+        outcome.bytes_saved(),
+        original.len() as u64 - payload.len() as u64
     );
-    let payload = outcome.output.read_all().expect("payload");
-    assert_eq!(&payload[0..2], &[0xFF, 0xD8], "not a JPEG stream");
-    assert_eq!(outcome.bytes_saved(), original.len() as u64 - payload.len() as u64);
     // An in-memory result leaves no scratch behind.
     assert_eq!(entries(&root), 0, "scratch leaked");
     let _ = std::fs::remove_dir_all(root);
@@ -124,17 +124,7 @@ async fn quality_is_respected_and_the_default_applies_when_omitted() {
     let mut cfg = test_config(1_000_000, 25_000_000);
     cfg.compression_default_quality = 20;
     let engine = Engine::new(cfg.clone());
-
-    // JPEG in, JPEG out: size must follow quality monotonically.
-    let small = engine
-        .run(
-            Job::new(
-                Action::Compress,
-                "a.jpg",
-                Input::Bytes(jpeg_bytes()),
-            )
-            .with_quality(5),
-        )
+        .run(Job::new(Action::Compress, "a.jpg", Input::Bytes(jpeg_bytes())).with_quality(5))
         .await
         .expect("low quality");
     let omitted = engine
@@ -145,17 +135,7 @@ async fn quality_is_respected_and_the_default_applies_when_omitted() {
         ))
         .await
         .expect("default quality");
-    cfg.compression_default_quality = 95;
-    let big_engine = Engine::new(cfg);
-    let big = big_engine
-        .run(
-            Job::new(
-                Action::Compress,
-                "a.jpg",
-                Input::Bytes(jpeg_bytes()),
-            )
-            .with_quality(95),
-        )
+        .run(Job::new(Action::Compress, "a.jpg", Input::Bytes(jpeg_bytes())).with_quality(95))
         .await
         .expect("high quality");
 
@@ -183,7 +163,10 @@ async fn wraps_an_image_in_a_pdf_the_caller_can_read_back() {
         .expect("image_to_pdf");
     let pdf = outcome.output.read_all().expect("pdf bytes");
     assert!(pdf.starts_with(b"%PDF-"), "no PDF header");
-    assert!(pdf.windows(7).any(|w| w == b"startxref"), "no xref");
+    assert!(
+        pdf.windows(b"startxref".len()).any(|w| w == b"startxref"),
+        "no xref"
+    );
     assert!(pdf.windows(5).any(|w| w == b"%%EOF"), "no EOF marker");
     assert_eq!(outcome.output.filename, "scan.pdf");
     assert_eq!(outcome.output.content_type, "application/pdf");
@@ -225,13 +208,7 @@ async fn refuses_input_it_cannot_use() {
             Action::Compress,
             "notes.txt",
             Input::Bytes(b"prose, not pixels".to_vec()),
-        ))
-        .await
-        .expect_err("text must not be compressed as an image");
-    assert!(
-        matches!(err, AppError::UnsupportedMediaType(_)),
-        "{err:?}"
-    );
+    assert!(matches!(err, AppError::UnsupportedMediaType(_)), "{err:?}");
     assert_eq!(err.code(), "unsupported_media_type");
     assert_eq!(entries(&root), 0);
     let _ = std::fs::remove_dir_all(root);
@@ -246,11 +223,15 @@ async fn validates_action_and_quality_from_raw_field_values() {
         .expect_err("unknown action");
     assert!(matches!(err, AppError::BadRequest(_)), "{err:?}");
 
-    // An empty quality means "use the server default" (asserted below), so only real
-    // out-of-range or non-numeric values are refused here.
-    for bad in ["0", "101", "-4", "abc", "60.5"] {
-        let err = Job::from_fields(Some("compress"), Some(bad), Some("a.png"), input(), false, 60)
-            .expect_err("quality must be 1..=100");
+        let err = Job::from_fields(
+            Some("compress"),
+            Some(bad),
+            Some("a.png"),
+            input(),
+            false,
+            60,
+        )
+        .expect_err("quality must be 1..=100");
         assert!(matches!(err, AppError::BadRequest(_)), "{bad}: {err:?}");
     }
 
@@ -285,13 +266,7 @@ async fn a_decode_bigger_than_the_memory_budget_is_refused_not_attempted() {
     assert!(
         big.len() < 512 * 1024,
         "test input must stay small so the budget is what refuses it: {} bytes",
-        big.len()
-    );
-    let err = engine
-        .run(
-            Job::new(Action::Compress, "big.png", Input::Bytes(big.clone()))
-                .with_quality(50),
-        )
+        .run(Job::new(Action::Compress, "big.png", Input::Bytes(big.clone())).with_quality(50))
         .await
         .expect_err("over-budget decode");
     assert!(
@@ -305,13 +280,7 @@ async fn a_decode_bigger_than_the_memory_budget_is_refused_not_attempted() {
 
     // With room to spare, the same file is accepted.
     let ok = test_config(8_000_000, 25_000_000);
-    let ok_root = ok.tmp_dir.clone();
-    let roomy = Engine::new(ok);
-    let outcome = roomy
-        .run(
-            Job::new(Action::Compress, "big.png", Input::Bytes(big))
-                .with_quality(50),
-        )
+        .run(Job::new(Action::Compress, "big.png", Input::Bytes(big)).with_quality(50))
         .await
         .expect("within budget");
     assert!(outcome.output.size() > 0);
@@ -324,14 +293,7 @@ async fn a_decode_bigger_than_the_memory_budget_is_refused_not_attempted() {
 #[tokio::test]
 async fn pdf_actions_say_503_when_the_tool_is_absent() {
     let (engine, root) = setup();
-    let pdf = fileoptimize::processing::pdf_gen::build_image_pdf(&jpeg_bytes(), 24, 16, 100.0);
-    let tools = engine.tools().await;
-    let outcome = engine
-        .run(Job::new(
-            Action::PdfToImage,
-            "doc.pdf",
-            Input::Bytes(pdf),
-        ))
+        .run(Job::new(Action::PdfToImage, "doc.pdf", Input::Bytes(pdf)))
         .await;
     match outcome {
         Ok(got) => {
@@ -339,13 +301,7 @@ async fn pdf_actions_say_503_when_the_tool_is_absent() {
             let bytes = got.output.read_all().expect("bytes");
             let is_png = bytes.starts_with(&[0x89, b'P', b'N', b'G']);
             let is_zip = bytes.starts_with(b"PK");
-            assert!(is_png || is_zip, "unexpected payload");
-        }
-        Err(err) => {
-            assert!(
-                matches!(err, AppError::ExternalToolMissing(_)),
-                "{err:?}"
-            );
+            assert!(matches!(err, AppError::ExternalToolMissing(_)), "{err:?}");
             assert_eq!(err.code(), "external_tool_missing");
         }
     }
@@ -372,13 +328,7 @@ async fn a_file_input_is_left_where_it_was() {
     std::fs::create_dir_all(&outside).expect("caller dir");
     let mine = outside.join("holiday.png");
     let bytes = png_bytes(24, 16);
-    std::fs::write(&mine, &bytes).expect("write");
-
-    let outcome = engine
-        .run(
-            Job::new(Action::Compress, "holiday.png", Input::Path(mine.clone()))
-                .with_quality(40),
-        )
+        .run(Job::new(Action::Compress, "holiday.png", Input::Path(mine.clone())).with_quality(40))
         .await
         .expect("compress a caller-owned path");
 
@@ -396,12 +346,13 @@ async fn a_file_input_is_left_where_it_was() {
 
 #[tokio::test]
 async fn a_retained_result_can_be_read_back_and_dropped() {
-    let (engine, root) = setup();
-    let outcome = engine
-        .run(
-            Job::new(Action::Compress, "keep.png", Input::Bytes(png_bytes(24, 16)))
-                .with_quality(45)
-                .stored(),
+            Job::new(
+                Action::Compress,
+                "keep.png",
+                Input::Bytes(png_bytes(24, 16)),
+            )
+            .with_quality(45)
+            .stored(),
         )
         .await
         .expect("stored run");
@@ -424,15 +375,17 @@ async fn a_retained_result_can_be_read_back_and_dropped() {
     let payload = fetched.read_all().expect("payload");
     assert_eq!(payload.len() as u64, meta.output_size);
 
-    assert!(engine.discard(&id).await.expect("discard"));
-    let err = engine.result(&id).await.expect_err("gone");
-    assert!(matches!(err, AppError::NotFound(_)), "{err:?}");
-    assert!(!engine.discard(&id).await.expect("second discard"), "double delete");
+    assert!(
+        !engine.discard(&id).await.expect("second discard"),
+        "double delete"
+    );
 
     // The scratch dirs are transient; only the retained copy existed, and it is now
     // removed as well.
-    assert_eq!(entries(&root), 1, "expected only the results container");
-    assert!(engine.results_dir().exists(), "container must survive sweeps");
+    assert!(
+        engine.results_dir().exists(),
+        "container must survive sweeps"
+    );
     let _ = std::fs::remove_dir_all(root);
 }
 

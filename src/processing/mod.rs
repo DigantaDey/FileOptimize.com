@@ -32,6 +32,19 @@ pub struct Output {
     pub content_type: String,
 }
 
+/// Deliberately terse: a payload can be hundreds of megabytes, and `{:?}` on one would
+/// be a wall of bytes in the middle of a log line.
+impl std::fmt::Debug for Output {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Output")
+            .field("filename", &self.filename)
+            .field("content_type", &self.content_type)
+            .field("bytes", &self.size())
+            .field("streamed", &self.is_streamed())
+            .finish()
+    }
+}
+
 impl Output {
     pub fn in_memory(data: Vec<u8>, filename: String, content_type: &str) -> Self {
         Output {

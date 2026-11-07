@@ -78,14 +78,8 @@ impl IntoResponse for AppError {
         if status.is_server_error() {
             tracing::error!(status = %status, code, error = %message, "request failed");
         } else {
-            tracing::debug!(status = %status, code, error = %message, "request rejected");
-        }
-
-        let mut response = (
-            status,
-            Json(json!({ "error": message, "code": code })),
-        )
-            .into_response();
+        let mut response =
+            (status, Json(json!({ "error": message, "code": code }))).into_response();
         if status == StatusCode::UNAUTHORIZED {
             if let Ok(value) =
                 HeaderValue::from_str("Bearer realm=\"fileoptimize\", error=\"invalid_key\"")
