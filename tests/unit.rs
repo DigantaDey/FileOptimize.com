@@ -283,20 +283,32 @@ fn image_pdf_has_valid_structure_and_xref_offsets() {
     assert_eq!(declared, s_end - s_start, "content stream /Length mismatch");
     assert!(rest[s_start..s_end].starts_with("q "), "{rest}");
 
-    // Every recorded offset must land exactly on its object header.
+    // Every recorded offset must land exactly on its object header. The rows are read as
+    // whitespace-delimited tokens rather than fixed 10-byte slices, so the assertion
+    // checks the number rather than the writer's column layout — and the whole table is
+    // quoted in the failure message, which is the only way to see what the writer did.
     let table = &text[offset..];
-    let mut lines = table.lines().skip(3); // "xref", size, free entry
+    let mut rows = table.lines().skip(3); // "xref", the size line, the free entry
     for num in 1..=5u32 {
-        let line = lines.next().expect("xref entry");
-        let off: usize = line[..10].parse().expect("offset digits");
-        let expect = format!("{num} 0 obj");
+        let row = rows
+            .next()
+            .unwrap_or_else(|| panic!("xref row {num} missing from {table:?}"));
+        let off: usize = row
+            .split_whitespace()
+            .next()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or_else(|| panic!("xref row {num} is not a byte offset: {row:?}"));
+        let header = format!("{num} 0 obj");
         assert_eq!(
-            &text[off..off + expect.len()],
-            expect,
-            "bad offset for object {num}"
+            &text[off..off + header.len()],
+            header,
+            "bad offset for object {num}: {table:?}"
         );
     }
-    assert!(lines.next().is_none(), "unexpected extra xref entries");
+    match rows.next() {
+        None | Some("trailer") => {}
+        Some(extra) => panic!("unexpected extra xref row {extra:?} in {table:?}"),
+    }
 }
 
 #[test]
