@@ -76,7 +76,9 @@ jobs:
       - name: Build
         run: cargo build --release --bin fileoptimize
       - name: Binary size
-        run: ls -lh target/release/fileoptimize | awk '{print "release binary: " $5}'
+        run: |
+          ls -lh target/release/fileoptimize
+          du -h target/release/fileoptimize | awk '{print "release binary size: " $1}'
       - uses: actions/upload-artifact@v4
         with:
           name: fileoptimize-linux-x86_64
