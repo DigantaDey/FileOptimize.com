@@ -29,7 +29,7 @@
 //! # Guarantees every caller gets
 //!
 //! * input size, image dimensions, action and quality are validated *before* any
-//!  expensive work happens — the same checks the HTTP API applies;
+//!   expensive work happens — the same checks the HTTP API applies;
 //! * one [`tokio::sync::Semaphore`] bounds how many jobs run at once and a second,
 //!   weighted one bounds the *bytes* they may hold at once
 //!   (`Config::memory_budget_mb`), so peak RSS is
@@ -441,7 +441,7 @@ impl Engine {
                     .await?
             }
             Action::PdfToImage => {
-                self.pdf_to_image(&mut prepared, &kind, &original_name)
+                self.pdf_to_image(&prepared, &kind, &original_name)
                     .await?
             }
         };
