@@ -164,6 +164,16 @@ jobs:
           smoke() {
             # xtrace so the transcript ends with the exact command that failed.
             set -x
+              # One helper so a regression names itself instead of printing a code.
+            expect() {
+              want=$1; label=$2; shift 2
+              got=$(curl -s -o /dev/null -w '%{http_code}' "$@")
+              if [ "$got" != "$want" ]; then
+                echo "$label: expected $want, got $got"
+                exit 1
+              fi
+              echo "$label: $got ok"
+            }
             ./bin/fileoptimize > /tmp/server.log 2>&1 &
             pid=$!
             for i in $(seq 1 30); do
@@ -228,7 +238,7 @@ jobs:
             grep -qi '^content-disposition: attachment' /tmp/h.txt || { echo "missing disposition"; exit 1; }
 
             echo "--- a bogus result id is refused before any disk access"
-            curl -s -o /dev/null -w '%{http_code}\n' "http://127.0.0.1:8099/api/v1/results/nope"
+            expect 400 "malformed id refused" "http://127.0.0.1:8099/api/v1/results/not-an-id"
 
             echo "--- a key-protected instance"
             API_KEYS=smoke-secret-1 PORT=8098 ./bin/fileoptimize > /tmp/server-auth.log 2>&1 &
@@ -237,22 +247,15 @@ jobs:
               curl -fsS http://127.0.0.1:8098/api/v1/health >/dev/null 2>&1 && break
               sleep 1
             done
-            expect() {
-              want=$1; label=$2; shift 2
-              got=$(curl -s -o /dev/null -w '%{http_code}' "$@")
-              if [ "$got" != "$want" ]; then
-                echo "$label: expected $want, got $got"
-                exit 1
-              fi
-              echo "$label: $got ok"
-            }
             expect 401 "no key"    -X POST -F "file=@/tmp/px.png" http://127.0.0.1:8098/api/v1/process
             expect 401 "bad key"   -X POST -H 'x-api-key: nope' -F "file=@/tmp/px.png" http://127.0.0.1:8098/api/v1/process
             expect 200 "good key"  -X POST -H 'x-api-key: smoke-secret-1' -F "file=@/tmp/px.png" http://127.0.0.1:8098/api/v1/process
             expect 200 "bearer"    -X POST -H 'Authorization: Bearer smoke-secret-1' -F "file=@/tmp/px.png" http://127.0.0.1:8098/api/v1/process
             expect 200 "query key" -X POST -F "file=@/tmp/px.png" "http://127.0.0.1:8098/api/v1/process?api_key=smoke-secret-1"
             expect 200 "info open" http://127.0.0.1:8098/api/v1/info
-            expect 404 "results need a real id" http://127.0.0.1:8098/api/v1/results/00000000000000000000000000000000
+            expect 401 "results need a key too" http://127.0.0.1:8098/api/v1/results/00000000000000000000000000000000
+            expect 404 "unknown id after auth" -H 'x-api-key: smoke-secret-1' \
+              http://127.0.0.1:8098/api/v1/results/00000000000000000000000000000000
             kill $apid
             kill $pid
             echo "--- server log"; cat /tmp/server.log
