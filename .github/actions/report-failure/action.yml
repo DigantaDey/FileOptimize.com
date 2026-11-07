@@ -1,0 +1,42 @@
+name: Report failure
+description: >-
+  Attaches the captured command output to the pull request as a comment, so a failing
+  build is reviewable inline (useful when runner logs are not reachable).
+
+inputs:
+  title:
+    description: Section header for the comment
+    required: true
+  log:
+    description: Path to the captured log file
+    required: true
+  token:
+    description: Token used to post the comment
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Post comment
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        TITLE: ${{ inputs.title }}
+        LOG: ${{ inputs.log }}
+      run: |
+        if [ -z "${PR_NUMBER:-}" ]; then
+          echo "Not a pull_request event — skipping comment."
+          exit 0
+        fi
+        if [ ! -s "$LOG" ]; then
+          echo "No output captured in $LOG — skipping comment."
+          exit 0
+        fi
+        {
+          printf '### ❌ %s\n\n```text\n' "$TITLE"
+          tail -c 42000 "$LOG"
+          printf '\n```\n'
+        } > /tmp/report-body.md
+        gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file /tmp/report-body.md \
+          || echo "Could not post the report (permissions?)"

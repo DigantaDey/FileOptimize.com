@@ -18,21 +18,35 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
   RUST_BACKTRACE: 1
+  DEBIAN_FRONTEND: noninteractive
 
 jobs:
   fmt:
     name: Format
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - run: cargo fmt --all -- --check
+      - name: Check formatting
+        run: cargo fmt --all -- --check | tee /tmp/fmt.log; exit "${PIPESTATUS[0]}"
+      - uses: ./.github/actions/report-failure
+        if: failure()
+        with:
+          title: cargo fmt --check
+          log: /tmp/fmt.log
+          token: ${{ secrets.GITHUB_TOKEN }}
 
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -41,11 +55,21 @@ jobs:
       - name: Install PDF tooling
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ghostscript poppler-utils
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --all-targets -- -D warnings
+      - name: Lint
+        run: cargo clippy --all-targets -- -D warnings 2>&1 | tee /tmp/clippy.log; exit "${PIPESTATUS[0]}"
+      - uses: ./.github/actions/report-failure
+        if: failure()
+        with:
+          title: cargo clippy -D warnings
+          log: /tmp/clippy.log
+          token: ${{ secrets.GITHUB_TOKEN }}
 
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      pull-requests: write
     strategy:
       fail-fast: false
       matrix:
@@ -61,12 +85,21 @@ jobs:
         run: brew install ghostscript poppler
       - uses: Swatinem/rust-cache@v2
       - name: Run tests
-        run: cargo test -- --nocapture
+        run: cargo test -- --nocapture 2>&1 | tee /tmp/test.log; exit "${PIPESTATUS[0]}"
+      - uses: ./.github/actions/report-failure
+        if: failure()
+        with:
+          title: cargo test (${{ matrix.os }})
+          log: /tmp/test.log
+          token: ${{ secrets.GITHUB_TOKEN }}
 
   build:
     name: Release build
     needs: [fmt, clippy, test]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -74,7 +107,7 @@ jobs:
         with:
           key: release
       - name: Build
-        run: cargo build --release --bin fileoptimize
+        run: cargo build --release --bin fileoptimize 2>&1 | tee /tmp/build.log; exit "${PIPESTATUS[0]}"
       - name: Binary size
         run: |
           ls -lh target/release/fileoptimize
@@ -84,11 +117,20 @@ jobs:
           name: fileoptimize-linux-x86_64
           path: target/release/fileoptimize
           retention-days: 14
+      - uses: ./.github/actions/report-failure
+        if: failure()
+        with:
+          title: cargo build --release
+          log: /tmp/build.log
+          token: ${{ secrets.GITHUB_TOKEN }}
 
   smoke:
     name: Smoke test (release binary)
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -104,7 +146,7 @@ jobs:
           RUST_LOG: info
         run: |
           set -euo pipefail
-          ./bin/fileoptimize &
+          ./bin/fileoptimize > /tmp/server.log 2>&1 &
           pid=$!
           for i in $(seq 1 30); do
             curl -fsS http://127.0.0.1:8099/api/health >/dev/null 2>&1 && break
@@ -112,19 +154,35 @@ jobs:
           done
           echo "--- health"; curl -fsS http://127.0.0.1:8099/api/health; echo
           echo "--- info";   curl -fsS http://127.0.0.1:8099/api/info; echo
-          echo "--- ui";     curl -fsS http://127.0.0.1:8099/ | grep -q "<!DOCTYPE html>" && echo ok
-          echo "--- 404";    curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8099/nope
-          echo "--- 400";    curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:8099/api/process
-          echo "--- 415";    curl -s -o /dev/null -w '%{http_code}\n' -X POST -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:8099/api/process
+          echo "--- ui";      curl -fsS http://127.0.0.1:8099/ | grep -q "<!DOCTYPE html>" && echo ok
+          echo "--- assets";  curl -fsS http://127.0.0.1:8099/assets/style.css | head -c 40; echo
+          echo "--- 404";     curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8099/nope
+          echo "--- 415";     curl -s -o /dev/null -w '%{http_code}\n' -X POST -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:8099/api/process
+          echo "--- 400";     curl -s -X POST -F 'action=nope' http://127.0.0.1:8099/api/process; echo
+          echo "--- 400b";    curl -s -X POST -F 'action=compress' -F 'quality=101' -F 'file=@/etc/hostname;type=image/png' http://127.0.0.1:8099/api/process; echo
           kill $pid
+          echo "--- server log"; cat /tmp/server.log
+      - name: Keep the server log
+        if: always()
+        run: cp /tmp/server.log /tmp/smoke.log 2>/dev/null || touch /tmp/smoke.log
+      - uses: ./.github/actions/report-failure
+        if: failure()
+        with:
+          title: release binary smoke test
+          log: /tmp/smoke.log
+          token: ${{ secrets.GITHUB_TOKEN }}
 
   docker:
     name: Docker image
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
       - name: Build image
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
