@@ -12,6 +12,7 @@ use image::{ExtendedColorType, ImageBuffer, ImageEncoder, Rgb};
 use tower::ServiceExt;
 
 use fileoptimize::config::Config;
+use fileoptimize::processing::pdf::{gs_available, pdftoppm_available};
 use fileoptimize::processing::pdf_gen::build_image_pdf;
 use fileoptimize::routes;
 use fileoptimize::state::AppState;
@@ -19,6 +20,9 @@ use fileoptimize::state::AppState;
 const BOUNDARY: &str = "----FileOptimizeTestBoundary7e1a";
 
 static SEQ: AtomicU32 = AtomicU32::new(0);
+
+/// Distinct scratch dirs for the tool-facing tests, which run in parallel.
+static DIR_SEQ: AtomicU32 = AtomicU32::new(0);
 
 /// Test config: an isolated temp root and small caps, so limit paths are cheap to hit.
 fn test_config(max_upload: u64, max_pixels: u32) -> Config {
@@ -376,7 +380,10 @@ async fn framework_body_limit_rejects_absurd_requests() {
     // body guard, which aborts the stream mid-parse (400). Either way: a clean client
     // error, no hang, and nothing left on disk.
     assert!(
-        matches!(status, StatusCode::PAYLOAD_TOO_LARGE | StatusCode::BAD_REQUEST),
+        matches!(
+            status,
+            StatusCode::PAYLOAD_TOO_LARGE | StatusCode::BAD_REQUEST
+        ),
         "unexpected status {status}"
     );
     assert_eq!(
@@ -465,11 +472,11 @@ async fn rewrites_a_traversal_filename_in_the_download_header() {
     ]);
     let (status, headers, out) = send(&app, post_process(body)).await;
     assert_eq!(status, StatusCode::OK, "{}", err_of(&out));
-    // Path components and leading dots dropped, the (header-safe) space kept, suffix
-    // appended — exactly what the download is named.
+    // Only the last path component survives (directories are dropped, not rewritten),
+    // then the action's suffix is appended — a name that cannot point anywhere else.
     assert_eq!(
         hdr(&headers, header::CONTENT_DISPOSITION),
-        "attachment; filename=\"secret dir-photo_optimized.jpg\""
+        "attachment; filename=\"photo_optimized.jpg\""
     );
     let _ = std::fs::remove_dir_all(root);
 }
@@ -711,6 +718,107 @@ async fn pdf_tools_either_work_or_are_reported_as_missing() {
         leftovers(&root)
     );
     let _ = std::fs::remove_dir_all(root);
+}
+
+/// Our PDFs are hand-built, so they must be checked against a strict mainstream parser
+/// and against the exact command line the service uses — not only against Ghostscript,
+/// which is lenient about missing stream dictionaries.
+#[tokio::test]
+async fn poppler_rasterises_the_pdfs_we_generate() {
+    use std::process::Command as StdCommand;
+    use std::process::Stdio;
+
+    if !pdftoppm_available().await {
+        eprintln!("skipped: poppler not installed");
+        return;
+    }
+    let dir = scratch_dir("poppler");
+    let pdf_path = dir.join("doc.pdf");
+    std::fs::write(&pdf_path, valid_pdf()).expect("write pdf");
+
+    let out = StdCommand::new("pdftoppm")
+        .args(["-png", "-r150"])
+        .arg(&pdf_path)
+        .arg(dir.join("page"))
+        .stdin(Stdio::null())
+        .output()
+        .expect("pdftoppm runnable");
+    let pages: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .map(|rd| {
+            rd.flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("png"))
+                .collect()
+        })
+        .unwrap_or_default();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(
+        out.status.success(),
+        "pdftoppm rejected our PDF: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(pages.len(), 1, "expected exactly one rendered page");
+    let img = image::open(&pages[0]).expect("rendered page is not a decodable PNG");
+    assert!(
+        img.width() >= 32 && img.height() >= 24,
+        "unexpected raster size {}x{}",
+        img.width(),
+        img.height()
+    );
+}
+
+/// The compressor's own tool must accept what we generate, end to end, `--` and all.
+#[tokio::test]
+async fn ghostscript_rewrites_the_pdfs_we_generate() {
+    use std::process::Command as StdCommand;
+    use std::process::Stdio;
+
+    if !gs_available().await {
+        eprintln!("skipped: ghostscript not installed");
+        return;
+    }
+    let dir = scratch_dir("gs");
+    let pdf_path = dir.join("doc.pdf");
+    std::fs::write(&pdf_path, valid_pdf()).expect("write pdf");
+    let out_path = dir.join("out.pdf");
+
+    let out = StdCommand::new("gs")
+        .args([
+            "-sDEVICE=pdfwrite",
+            "-dCompatibilityLevel=1.4",
+            "-dPDFSETTINGS=/ebook",
+            "-dNOPAUSE",
+            "-dBATCH",
+            "-dQUIET",
+            "-dSAFER",
+        ])
+        .arg(format!("-sOutputFile={}", out_path.display()))
+        .arg("--")
+        .arg(&pdf_path)
+        .stdin(Stdio::null())
+        .output()
+        .expect("gs runnable");
+    let produced = std::fs::metadata(&out_path).map(|m| m.len()).unwrap_or(0);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(
+        out.status.success(),
+        "ghostscript rejected our PDF: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(produced > 0, "ghostscript wrote an empty file");
+}
+
+fn scratch_dir(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "fileoptimize-{tag}-{}-{}",
+        std::process::id(),
+        DIR_SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create scratch dir");
+    dir
 }
 
 #[tokio::test]

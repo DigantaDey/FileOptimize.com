@@ -156,10 +156,12 @@ pub async fn pdf_to_images(
     tokio::fs::create_dir_all(out_dir).await?;
     let prefix = out_dir.join("page");
 
+    // Note: no `--` end-of-options marker — poppler's tools do not implement one, and
+    // would go looking for a file called `--`. Our paths are absolute and generated, so
+    // an option-looking argument cannot occur here.
     let child = Command::new("pdftoppm")
         .arg("-png")
         .arg(format!("-r{dpi}"))
-        .arg("--")
         .arg(input)
         .arg(&prefix)
         .stdin(Stdio::null())
@@ -177,7 +179,7 @@ pub async fn pdf_to_images(
 
     let (status, stderr) = wait_capped(child, "pdftoppm", timeout).await?;
     if !status.success() {
-        tracing::warn!(code = ?status.code(), stderr = %stderr.trim(), "pdftoppm failed");
+        tracing::error!(code = ?status.code(), stderr = %stderr.trim(), "pdftoppm failed");
         return Err(AppError::Internal(
             "the PDF could not be rendered (it may be damaged or password-protected)".to_string(),
         ));

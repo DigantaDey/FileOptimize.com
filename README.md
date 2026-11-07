@@ -83,6 +83,16 @@ X-Output-Size:       bytes out
 X-Original-Filename: sanitised upload name
 ```
 
+Download names are derived from the sanitised upload name, per action:
+
+| Action | Input | Output name |
+| --- | --- | --- |
+| `compress` | image | `photo.jpg` → `photo_optimized.jpg` (a PNG at quality ≥ 90 stays `photo_optimized.png`) |
+| `compress` | PDF | `report.pdf` → `report_compressed.pdf` |
+| `image_to_pdf` | image | `scan.png` → `scan.pdf` |
+| `pdf_to_image` | PDF, one page | `doc.pdf` → `doc.png` |
+| `pdf_to_image` | PDF, several pages | `doc.pdf` → `doc_images.zip`, entries `page_0001.png` … |
+
 Errors are JSON: `{ "error": "quality 101 out of range: must be between 1 and 100" }`.
 
 ## Limits, checks and bounds
