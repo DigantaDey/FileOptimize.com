@@ -209,6 +209,13 @@ pub fn parse_quality(raw: Option<&str>, default: u8) -> AppResult<u8> {
     if s.is_empty() {
         return Ok(default);
     }
+    // Digits only: `str::parse::<i64>` would also accept `+5`, and a form field that
+    // quietly means something else is worse than a 400.
+    if !s.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(AppError::BadRequest(format!(
+            "invalid quality '{s}': must be an integer between 1 and 100"
+        )));
+    }
     let v: i64 = s.parse().map_err(|_| {
         AppError::BadRequest(format!(
             "invalid quality '{s}': must be an integer between 1 and 100"

@@ -242,11 +242,17 @@ fn image_pdf_has_valid_structure_and_xref_offsets() {
 
     // /Length must match the stream payload exactly or viewers reject the file.
     let at = text.find("/Length ").expect("length key");
-    let len_str = text[at + 8..]
-        .split_whitespace()
-        .next()
-        .expect("len digits");
-    assert_eq!(len_str.parse::<usize>().expect("len int"), jpeg.len());
+    // `>>` is a delimiter, so writers may glue it to the number — read the leading
+    // digits rather than a whitespace-delimited token.
+    let digits: String = text[at + 8..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    assert_eq!(
+        digits.parse::<usize>().expect("len int"),
+        jpeg.len(),
+        "/Length does not match the embedded stream"
+    );
 
     // startxref must point at the real xref table.
     let start = text.rfind("startxref").expect("startxref");

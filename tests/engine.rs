@@ -233,10 +233,7 @@ async fn an_image_that_cannot_be_made_smaller_comes_back_as_it_was() {
     let (engine, root) = setup();
     let original = png_bytes(24, 16);
     let outcome = engine
-        .run(
-            Job::new(Action::Compress, "dot.png", Input::Bytes(original.clone()))
-                .with_quality(25),
-        )
+        .run(Job::new(Action::Compress, "dot.png", Input::Bytes(original.clone())).with_quality(25))
         .await
         .expect("compress");
 
